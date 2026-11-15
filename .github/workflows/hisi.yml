@@ -1,0 +1,169 @@
+name: Hi3798MV100 内核自动构建
+
+# 触发方式：推送到 main、手动触发、发布 Release
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/hisi.yml'
+      - 'apply_hi3798mv100_v7.3_patches.sh'
+      - 'kernel.config'
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: 'Linux 内核版本标签'
+        default: 'v7.3-rc7'
+        required: true
+      patches_commit:
+        description: '补丁仓库 Commit 哈希（留空则用最新 main）'
+        default: ''
+        required: false
+  release:
+    types: [ published ]
+
+# 上传 Release 附件需要写权限
+permissions:
+  contents: write
+
+jobs:
+  build-hi3798mv100:
+    name: 编译 Hi3798MV100 内核+模块
+    runs-on: ubuntu-latest
+    env:
+      ARCH: arm
+      CROSS_COMPILE: arm-linux-gnueabihf-
+      # 固定补丁仓库位置，供打补丁脚本使用
+      PATCHES_DIR: ${{ github.workspace }}/histb-hi3798-patches
+
+    steps:
+      # 1. 检出你自己的仓库（只含脚本与配置）
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+
+      # 2. 安装 ARM32 交叉编译链与编译依赖
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
+            bc bison flex libssl-dev libncurses5-dev \
+            ccache kmod u-boot-tools cpio rsync
+
+      # 3. 缓存 ccache（同一内核版本复用，命中后编译提速 70%-80%）
+      - name: 缓存 ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ github.event.inputs.kernel_version || 'v7.3-rc7' }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ github.event.inputs.kernel_version || 'v7.3-rc7' }}-
+            ccache-${{ runner.os }}-
+
+      - name: 初始化 ccache 配置
+        run: |
+          ccache --max-size=5G
+          ccache --set-config=compression=true
+          ccache -z
+          ccache -s
+
+      # 4. 拉取对应版本 Linux 内核源码（需完整历史，git am 才能正常生成提交）
+      - name: 拉取 Linux 内核源码
+        run: |
+          git clone --branch ${{ github.event.inputs.kernel_version || 'v7.3-rc7' }} \
+            https://github.com/torvalds/linux.git linux_build
+
+      # 5. 实时拉取 histb 补丁仓库
+      - name: 拉取 Hi3798 补丁仓库
+        run: |
+          git clone https://github.com/histb-mainline/patches.git histb-hi3798-patches
+          if [ -n "${{ github.event.inputs.patches_commit }}" ]; then
+            git -C histb-hi3798-patches checkout ${{ github.event.inputs.patches_commit }}
+          fi
+
+      # 6. 部署脚本与配置文件到内核源码树
+      - name: 部署脚本与配置
+        run: |
+          cp apply_hi3798mv100_v7.3_patches.sh linux_build/
+          cp kernel.config linux_build/.config
+          chmod +x linux_build/apply_hi3798mv100_v7.3_patches.sh
+
+      # 7. 批量打补丁（与你本地命令一致）
+      - name: 应用 Hi3798MV100 补丁
+        run: |
+          cd linux_build
+          ./apply_hi3798mv100_v7.3_patches.sh
+
+      # 8. 补全内核配置依赖
+      - name: 补全内核配置
+        run: |
+          cd linux_build
+          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- olddefconfig
+
+      # 9. 编译内核、设备树、模块
+      - name: 编译内核与模块
+        run: |
+          cd linux_build
+          export CCACHE_DIR=$HOME/.ccache
+          make -j"$(nproc)" ARCH=arm CROSS_COMPILE="ccache arm-linux-gnueabihf-" zImage
+          make -j"$(nproc)" ARCH=arm CROSS_COMPILE="ccache arm-linux-gnueabihf-" hisilicon/hi3798mv100.dtb
+          make -j"$(nproc)" ARCH=arm CROSS_COMPILE="ccache arm-linux-gnueabihf-" modules
+
+      # 10. 整理并打包产物
+      - name: 打包产物
+        run: |
+          cd linux_build
+          mkdir -p output/boot output/modules/boot
+          cp arch/arm/boot/zImage output/boot/
+          cp arch/arm/boot/dts/hisilicon/hi3798mv100*.dtb output/boot/ 2>/dev/null || true
+          cp .config output/boot/config-hi3798mv100
+          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- \
+            INSTALL_MOD_PATH=output/modules modules_install
+          rm -f output/modules/lib/modules/*/build output/modules/lib/modules/*/source
+          ls -1 histb-hi3798-patches/*v7.3*hi3798mv100*.patch > output/patch_list.txt 2>/dev/null || true
+          cd output
+          tar -czf ../hi3798mv100-linux-7.3-kernel-modules.tar.gz .
+
+      # 11. 打印 ccache 命中统计
+      - name: ccache 统计
+        if: always()
+        run: ccache -s
+
+      # 12. 发布 Release 时自动附带产物
+      - name: 生成发布说明
+        run: |
+          cat > linux_build/release_notes.md <<EOF
+          ## 海思 Hi3798MV100 内核构建
+
+          | 项目 | 内容 |
+          | --- | --- |
+          | 芯片平台 | Hi3798MV100（ARMv7） |
+          | 内核版本 | ${KERNEL_VERSION} |
+          | 补丁来源 | histb-mainline/patches |
+          | 补丁提交 | ${PATCHES_COMMIT} |
+          | 构建时间 | $(date -u +%Y-%m-%dT%H:%M:%SZ) |
+          | 工具链 | arm-linux-gnueabihf- |
+
+          ### 产物内容
+          - \`boot/zImage\`：内核镜像
+          - \`boot/hi3798mv100*.dtb\`：设备树
+          - \`boot/config-*\`：本次内核配置
+          - \`modules/lib/modules/\`：内核模块
+
+          ### 刷机提示
+          1. 先备份原机固件与分区表
+          2. 将 zImage 与 dtb 写入对应分区
+          3. 模块目录整体拷贝到板端 /lib/modules/
+          EOF
+        env:
+          KERNEL_VERSION: ${{ github.event.inputs.kernel_version || 'v7.3-rc7' }}
+          PATCHES_COMMIT: ${{ github.event.inputs.patches_commit || 'main（最新）' }}
+
+      - name: 发布到 GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: hi3798mv100
+          files: linux_build/hi3798mv100-linux-7.3-kernel-modules.tar.gz
+          body_path: linux_build/release_notes.md
+          generate_release_notes: true
+
