@@ -2,7 +2,7 @@ name: Hi3798MV100 内核自动构建
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
     paths:
       - '.github/workflows/hisi.yml'
       - 'apply_hi3798mv100_v7.3_patches.sh'
@@ -14,9 +14,9 @@ on:
         required: true
         default: 'v7.3-rc7'
       patches_commit:
-        description: '补丁仓库 Commit（留空则用最新 main）'
+        description: '补丁仓库 Commit（留空则用最新 master）'
         required: false
-        default: ''
+        default: 'master'
   release:
     types: [ published ]
 
