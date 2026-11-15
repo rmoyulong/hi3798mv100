@@ -2,7 +2,8 @@ name: Hi3798MV100 内核自动构建
 
 on:
   push:
-    branches: [ master ]
+    # 仓库默认分支是 master；main 一并列出做兼容，哪个分支推都能触发
+    branches: [ master, main ]
     paths:
       - '.github/workflows/hisi.yml'
       - 'apply_hi3798mv100_v7.3_patches.sh'
@@ -14,9 +15,9 @@ on:
         required: true
         default: 'v7.3-rc7'
       patches_commit:
-        description: '补丁仓库 Commit（留空则用最新 master）'
+        description: '补丁仓库 Commit（留空则用该仓库默认分支最新提交）'
         required: false
-        default: 'master'
+        default: ''
   release:
     types: [ published ]
 
@@ -63,19 +64,21 @@ jobs:
             git -C histb-hi3798-patches checkout "${{ github.event.inputs.patches_commit }}"
           fi
 
-      - name: 部署打补丁脚本与内核配置
+      # 关键：脚本与日志都不落在 linux_build 里，内核 git 工作区保持干净，
+      # 不会触发脚本的工作区脏校验；CI=true 让它免交互自动继续
+      - name: 应用 Hi3798MV100 补丁
+        env:
+          CI: "true"
+          PATCHES_DIR: ${{ github.workspace }}/histb-hi3798-patches
+          LOG_FILE: ${{ github.workspace }}/patch_apply.log
         run: |
-          cp apply_hi3798mv100_v7.3_patches.sh linux_build/
-          cp kernel.config linux_build/.config
-          chmod +x linux_build/apply_hi3798mv100_v7.3_patches.sh
-
-      - name: 批量应用 Hi3798MV100 补丁
-        run: |
+          chmod +x apply_hi3798mv100_v7.3_patches.sh
           cd linux_build
-          ./apply_hi3798mv100_v7.3_patches.sh
+          bash ../apply_hi3798mv100_v7.3_patches.sh
 
-      - name: 补全内核配置依赖
+      - name: 部署内核配置并补全依赖
         run: |
+          cp kernel.config linux_build/.config
           cd linux_build
           make olddefconfig
 
@@ -124,7 +127,7 @@ jobs:
           | 芯片平台 | Hi3798MV100（ARMv7） |
           | 内核版本 | ${KVER} |
           | 补丁来源 | histb-mainline/patches |
-          | 补丁提交 | ${{ github.event.inputs.patches_commit || 'main（最新）' }} |
+          | 补丁提交 | ${{ github.event.inputs.patches_commit || '默认分支最新提交' }} |
           | 构建时间 | $(date -u +%Y-%m-%dT%H:%M:%SZ) |
           | 交叉工具链 | arm-linux-gnueabihf- |
 
