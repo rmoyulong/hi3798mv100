@@ -1,5 +1,7 @@
-海思Hi3798MV100 内核和模块、DTB编译 <br>
+海思Hi3798MV100(九联-UNT400B) 内核和模块、DTB编译 <br>
 Open-source software/firmware for HiSilicon Hi3716 / Hi3796 / Hi3798 devices
+
+本仓库编译的是九联-UNT400B，其他板子的参数请按照实际情况编写！
 
 - \`linux仓库\`： https://github.com/torvalds/linux.git <br>
 - \`海思的补丁仓库\`： https://github.com/histb-mainline/patches.git <br>
