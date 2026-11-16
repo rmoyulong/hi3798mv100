@@ -225,7 +225,8 @@ jobs:
       - name: 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
+          tag_name: hi3798mv100-latest
+          name: "Hi3798MV100 内核构建（${{ env.KERNEL_TAG }}）"
           body_path: linux_build/release_notes.md
           generate_release_notes: true
           files: |
@@ -233,3 +234,4 @@ jobs:
             linux_build/out/*.dtb
             linux_build/out/config-*
             linux_build/out/modules.tar.gz
+
