@@ -150,7 +150,14 @@ jobs:
           set -euo pipefail
           cd linux_build
           cp ../kernel.config .config
+          # 打开HDMI辅助层，避免sii9134链接失败
+          scripts/config --enable DRM_DISPLAY_HELPER --enable DRM_DISPLAY_HDMI_HELPER
           make olddefconfig
+
+          echo "=== 相关开关最终取值 ==="
+          for s in ARM_APPENDED_DTB SERIAL_AMBA_PL011 SERIAL_AMBA_PL011_CONSOLE DRM_DISPLAY_HELPER DRM_DISPLAY_HDMI_HELPER KERNEL_XZ; do
+            printf '%-28s %s\n' "$s" "$(grep -E "^CONFIG_${s}=|^# CONFIG_${s} is not set" .config || echo '（不存在）')"
+          done
 
       - name: 编译内核、设备树、模块
         run: |
@@ -218,15 +225,15 @@ jobs:
 
           ### 产物清单
           - \`zImage\`：内核镜像，内核自解压格式
-          - \`uImage\`：内核镜像，U-Boot 格式（比 zImage 多 64 字节头）
+          - \`uImage\`：**直接刷入内核分区**，dd if=uImage of=/dev/mmcblk0p6
           - \`*.dtb\`：设备树，Hi3798MV100 板级设备树以 hi3798mv100 开头
           - \`config-*\`：本次内核配置
-          - \`modules.tar.gz\`：内核模块
+          - \`modules.tar.gz\`：内核模块，解压到根目录/
 
           ### 刷机提示
           1. 刷写前务必备份原机固件与分区表
-          2. 引导程序要 U-Boot 格式就写 uImage，要自解压格式就写 zImage，两者择一，不要都写
-          3. dtb 按设备树分区写入，modules.tar.gz 解压后整体放到板端 /lib/modules/
+          2. uImage 直接写入 kernel 分区（/dev/mmcblk0p6），无需任何额外处理
+          3. modules.tar.gz 解压后整体放到板端根目录（/）
           EOF
 
       - name: 上传构建产物
