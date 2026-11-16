@@ -137,9 +137,27 @@ jobs:
 
       - name: 部署内核配置并补全依赖
         run: |
-          cp kernel.config linux_build/.config
+          set -euo pipefail
           cd linux_build
+          cp ../kernel.config .config
+
+          # 情况一：板子不用这颗外部 HDMI 发送器（设备树无引用时优先用这个）
+          scripts/config --disable DRM_SII9134
+
+          # 情况二：板子需要它，打开它引用的 HDMI 辅助层
+          #scripts/config --enable DRM_DISPLAY_HELPER --enable DRM_DISPLAY_HDMI_HELPER
+
           make olddefconfig
+
+          echo "=== 相关开关最终取值 ==="
+          for s in DRM DRM_KMS_HELPER DRM_DISPLAY_HELPER DRM_DISPLAY_HDMI_HELPER DRM_SII9134; do
+            printf '%-28s %s\n' "$s" "$(grep -E "^CONFIG_${s}=|^# CONFIG_${s} is not set" .config || echo '（不存在）')"
+          done
+          if grep -q '^CONFIG_DRM_SII9134=y' .config && ! grep -q '^CONFIG_DRM_DISPLAY_HDMI_HELPER=y' .config; then
+            echo "::error::DRM_SII9134 已启用但 HDMI 辅助层未启用"
+            exit 1
+          fi
+
 
       - name: 编译内核、设备树、模块
         run: |
