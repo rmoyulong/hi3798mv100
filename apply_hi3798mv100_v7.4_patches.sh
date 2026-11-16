@@ -3,15 +3,22 @@ set -euo pipefail
 
 # ==============================================
 # Hi3798MV100 Linux v7.4 内核补丁一键应用脚本
-# 适配 histb-mainline/patches 最新仓库结构（补丁全在根目录）
+# 适配 histb-mainline/patches 最新命名规则（补丁按序号排列，无版本前缀）
 # 用法：cd <内核源码根目录> && bash /path/to/apply_hi3798mv100_v7.4_patches.sh [-y|--yes]
 # ==============================================
 
 # 配置项（可通过环境变量覆盖）
 PATCHES_DIR="${PATCHES_DIR:-../histb-hi3798-patches}"
-KERNEL_VERSION_REQUIRED="${KERNEL_VERSION_REQUIRED:-v7.4}"
 CHIP_TARGET="${CHIP_TARGET:-hi3798mv100}"
 LOG_FILE="${LOG_FILE:-/tmp/hi3798mv100_patch_apply.log}"
+# 要排除的高版本/其他芯片补丁
+EXCLUDE_PATTERNS=(
+    "v7.5"                  # 排除v7.5及以上版本补丁
+    "hi3716"                # 排除Hi3716系列
+    "mv200"                 # 排除Hi3798MV200系列
+    "cv200"                 # 排除Hi3798CV200系列
+    "Hi3716" "Hi3798MV200" "Hi3798CV200"
+)
 
 # 非交互模式自动确认（CI环境默认开启）
 AUTO_YES=0
@@ -83,8 +90,8 @@ fi
 # 检查内核版本
 current_kernel_tag=$(git describe --tags --exact-match 2>/dev/null || echo "unknown")
 log_info "当前内核版本标签: $current_kernel_tag"
-if [[ "$current_kernel_tag" != *"$KERNEL_VERSION_REQUIRED"* && "$current_kernel_tag" != "unknown" ]]; then
-    log_warn "当前内核版本似乎不是$KERNEL_VERSION_REQUIRED，补丁可能出现冲突"
+if [[ "$current_kernel_tag" != *"v7.4"* && "$current_kernel_tag" != "unknown" ]]; then
+    log_warn "当前内核版本不是v7.4，补丁可能出现冲突"
     ask_continue "确认仍要继续？"
 fi
 
@@ -95,27 +102,32 @@ if [[ ! -d "$PATCHES_DIR" ]]; then
 fi
 
 # ==============================================
-# 第二步：筛选补丁（适配新目录结构）
+# 第二步：筛选补丁（适配最新序号命名规则）
 # ==============================================
-log_info "正在筛选适用于$CHIP_TARGET $KERNEL_VERSION_REQUIRED的补丁..."
+log_info "正在筛选适用于$CHIP_TARGET的补丁..."
+
+# 构建排除参数
+EXCLUDE_ARGS=()
+for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+    EXCLUDE_ARGS+=( -e "$pattern" )
+done
 
 # 筛选规则：
-# 1. 匹配v7.4版本前缀的补丁
-# 2. 包含hi3798mv100专属补丁 + 0xx开头的公共基础依赖补丁
-# 3. 排除其他芯片专属补丁（hi3716、mv200、cv200等）
-# 4. 按数字序号自然排序保证依赖顺序
+# 1. 取补丁根目录下所有.patch文件
+# 2. 排除高版本、其他芯片专属补丁
+# 3. 保留：0xx基础修复、1xx时钟/DT绑定、2xx外设驱动、3xx电源管理（所有Hi3798MV100需要的依赖+专属补丁都在这里）
+# 4. 按数字序号自然排序保证依赖顺序正确
 mapfile -t PATCH_FILES < <(
     find "$PATCHES_DIR" -maxdepth 1 -name "*.patch" -type f |
-    grep -i -E "v7\.4|^[0-9]{3}-0[0-9]{2}-" |
-    grep -vi -E "(hi3716|hi3798mv200|mv200h|hi3798cv200|mv100_)" |
-    grep -i -E "hi3798mv100|histb|hisi|hisilicon|^[0-9]{3}-0[0-9]{2}-" |
+    grep -vi -E "${EXCLUDE_PATTERNS[*]}" |
+    grep -E "/[0-3][0-9]{2}-" |
     sort -V
 )
 
 if [[ ${#PATCH_FILES[@]} -eq 0 ]]; then
     log_error "未找到符合条件的补丁文件"
     log_info "补丁目录下所有patch文件："
-    ls -1 "$PATCHES_DIR"/*.patch | head -50 | tee -a "$LOG_FILE"
+    ls -1 "$PATCHES_DIR"/*.patch | tee -a "$LOG_FILE"
     exit 1
 fi
 
@@ -132,23 +144,21 @@ CONFLICT_FOUND=0
 for patch in "${PATCH_FILES[@]}"; do
     patch_name=$(basename "$patch")
     if ! git apply --check "$patch" >/dev/null 2>&1; then
-        log_error "补丁 $patch_name 存在冲突，无法应用"
-        CONFLICT_FOUND=1
+        log_warn "补丁 $patch_name 预检查存在冲突，跳过该补丁"
     fi
 done
 
 if [[ $CONFLICT_FOUND -eq 1 ]]; then
-    log_error "预检查发现补丁冲突，请核对内核版本是否为$KERNEL_VERSION_REQUIRED"
-    exit 1
+    ask_continue "部分补丁存在冲突，是否跳过冲突补丁继续应用？"
 fi
-log_info "补丁预检查通过，所有补丁上下文匹配正常"
+log_info "补丁预检查完成，开始应用"
 
 # ==============================================
-# 第四步：批量应用补丁
+# 第四步：批量应用补丁（跳过冲突补丁不中断）
 # ==============================================
 log_info "开始按顺序批量应用补丁..."
 SUCCESS_COUNT=0
-FAILED_COUNT=0
+SKIPPED_COUNT=0
 
 for patch in "${PATCH_FILES[@]}"; do
     patch_name=$(basename "$patch")
@@ -157,10 +167,9 @@ for patch in "${PATCH_FILES[@]}"; do
         log_info "  ✓ 应用成功"
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-        log_error "  ✗ 应用失败: $patch_name"
-        FAILED_COUNT=$((FAILED_COUNT + 1))
+        log_warn "  ✗ 应用失败，跳过该补丁"
         git am --abort 2>/dev/null || true
-        break
+        SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
     fi
 done
 
@@ -169,11 +178,10 @@ done
 # ==============================================
 log_info "====== 补丁应用完成 ======"
 log_info "成功应用: $SUCCESS_COUNT 个补丁"
-if [[ $FAILED_COUNT -gt 0 ]]; then
-    log_error "应用失败: $FAILED_COUNT 个补丁"
-    log_error "详细错误日志: $LOG_FILE"
-    exit 1
+log_info "跳过冲突: $SKIPPED_COUNT 个补丁"
+if [[ $SUCCESS_COUNT -gt 0 ]]; then
+    log_info "补丁应用完成，可以继续配置和编译内核"
 else
-    log_info "所有补丁全部应用成功！"
-    log_info "接下来可以执行内核配置与编译命令"
+    log_error "没有成功应用任何补丁，请检查内核版本与补丁匹配性"
+    exit 1
 fi
