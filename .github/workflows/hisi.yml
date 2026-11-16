@@ -118,10 +118,17 @@ jobs:
             echo "::warning::baseline 未提供 BASE_SHA，跳过基准校验"
             exit 0
           fi
+          # baseline 里的 BASE_SHA 是「取工作树用的提交号」，可能是缩写形式，
+          # 而 rev-parse <tag> 对附注标签返回的是标签对象、不是提交，两者不能直接比。
+          # 这里同时取提交号与标签对象，并允许缩写前缀匹配，避免误报。
+          TAG_COMMIT="$(git -C linux_build rev-parse "${KERNEL_TAG}^{commit}")"
           TAG_OBJ="$(git -C linux_build rev-parse "$KERNEL_TAG")"
-          echo "本地标签对象：$TAG_OBJ"
+          echo "本地标签提交号：$TAG_COMMIT"
+          echo "本地标签对象号：$TAG_OBJ"
           echo "baseline 基准：$BASE_SHA"
-          if [ "$TAG_OBJ" = "$BASE_SHA" ]; then
+          if [ "$TAG_COMMIT" = "$BASE_SHA" ] || [ "$TAG_OBJ" = "$BASE_SHA" ] \
+             || [ "${TAG_COMMIT#"$BASE_SHA"}" != "$TAG_COMMIT" ] \
+             || [ "${TAG_OBJ#"$BASE_SHA"}" != "$TAG_OBJ" ]; then
             echo "内核树与 baseline 完全一致"
           else
             echo "::warning::内核树与 baseline 基准不一致，补丁可能出现上下文差异"
@@ -221,6 +228,19 @@ jobs:
           2. 引导程序要 U-Boot 格式就写 uImage，要自解压格式就写 zImage，两者择一，不要都写
           3. dtb 按设备树分区写入，modules.tar.gz 解压后整体放到板端 /lib/modules/
           EOF
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: hi3798mv100-linux
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            linux_build/out/zImage
+            linux_build/out/uImage
+            linux_build/out/*.dtb
+            linux_build/out/config-*
+            linux_build/out/modules.tar.gz
 
       - name: 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
