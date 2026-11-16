@@ -32,9 +32,11 @@ jobs:
       ARCH: arm
       CROSS_COMPILE: arm-linux-gnueabihf-
       KERNEL_REPO: https://github.com/torvalds/linux.git
-      # uImage 头里写入的加载/入口地址，取自实机可启动镜像的 Load Address / Entry Point
+      # uImage 头里写入的加载/入口地址，与实机可启动的 7.3.0 / 4.4.35 镜像一致
       # 必须加引号，否则 YAML 会把它当十进制整数，写进头里就不是 0x02000000
       UIMAGE_LOADADDR: "0x02000000"
+      # 要追加到 zImage 尾部的板级设备树，实机可启动镜像内嵌的就是这颗
+      TARGET_DTB: hi3798mv100-ec6108v9c.dtb
     steps:
       - name: 检出仓库代码
         uses: actions/checkout@v4
@@ -96,6 +98,8 @@ jobs:
             echo "| baseline 内核版本 | $BASE_VERSION |"
             echo "| 实际使用标签 | $KERNEL_TAG |"
             echo "| baseline 基准对象 | $BASE_SHA |"
+            echo "| uImage 加载/入口地址 | $UIMAGE_LOADADDR |"
+            echo "| 追加设备树 | $TARGET_DTB |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 恢复 ccache 缓存
@@ -155,9 +159,15 @@ jobs:
           make olddefconfig
 
           echo "=== 相关开关最终取值 ==="
-          for s in ARM_APPENDED_DTB SERIAL_AMBA_PL011 SERIAL_AMBA_PL011_CONSOLE DRM_DISPLAY_HELPER DRM_DISPLAY_HDMI_HELPER KERNEL_XZ; do
+          for s in ARM_APPENDED_DTB ARM_ATAG_DTB_COMPAT SERIAL_AMBA_PL011 SERIAL_AMBA_PL011_CONSOLE DRM_DISPLAY_HELPER DRM_DISPLAY_HDMI_HELPER KERNEL_XZ; do
             printf '%-28s %s\n' "$s" "$(grep -E "^CONFIG_${s}=|^# CONFIG_${s} is not set" .config || echo '（不存在）')"
           done
+
+          # 自解压代码只在开启该选项时才去识别追加的设备树，关掉则 uImage 里的 dtb 形同不存在
+          if ! grep -q '^CONFIG_ARM_APPENDED_DTB=y' .config; then
+            echo "::error::CONFIG_ARM_APPENDED_DTB 未开启，追加的设备树不会被识别"
+            exit 1
+          fi
 
       - name: 编译内核、设备树、模块
         run: |
@@ -170,16 +180,53 @@ jobs:
           make -j"$(nproc)" CROSS_COMPILE="ccache $CROSS_COMPILE" modules
           ccache -s
 
-      - name: 整理五类独立产物
+      - name: 追加设备树、打包 uImage 并整理五类产物
         run: |
           set -euo pipefail
           cd linux_build
           rm -rf out
           mkdir -p out
           KREL="$(make -s kernelrelease)"
-          # 1. zImage 内核镜像（内核自解压格式）
-          cp arch/arm/boot/zImage out/
-          # 2. uImage 内核镜像（U-Boot 格式，在 zImage 前加 64 字节头）
+
+          Z=arch/arm/boot/zImage
+          DTB_PATH="arch/arm/boot/dts/hisilicon/${TARGET_DTB}"
+          if [ ! -f "$DTB_PATH" ]; then
+            echo "::error::目标设备树不存在：$DTB_PATH"
+            ls arch/arm/boot/dts/hisilicon/ | grep -i hi3798mv100 || true
+            exit 1
+          fi
+
+          # 自解压代码按 zImage 头部偏移 0x2C 记录的值（zImage 末端）去定位追加的设备树，
+          # 设备树必须正好落在那个偏移上，否则内核找不到 dtb，在 fastboot 下必然启动失败
+          EXPECT_OFF="$(python3 -c 'import struct;d=open("arch/arm/boot/zImage","rb").read();print(struct.unpack("<I",d[44:48])[0])')"
+          ZSIZE="$(stat -c%s "$Z")"
+          echo "zImage 大小：$ZSIZE"
+          echo "头部记录的 zImage 末端偏移：$EXPECT_OFF"
+
+          if [ "$EXPECT_OFF" -eq 0 ] || [ "$EXPECT_OFF" -gt 67108864 ]; then
+            echo "::warning::头部未记录有效末端偏移，按 zImage 实际大小直接追加"
+            EXPECT_OFF="$ZSIZE"
+          elif [ "$EXPECT_OFF" -gt "$ZSIZE" ]; then
+            echo "按头部记录把 zImage 补零到 $EXPECT_OFF"
+            truncate -s "$EXPECT_OFF" "$Z"
+          elif [ "$EXPECT_OFF" -ne "$ZSIZE" ]; then
+            echo "::error::头部末端偏移($EXPECT_OFF)与 zImage 实际大小($ZSIZE)不一致，追加的设备树无法被识别"
+            exit 1
+          fi
+
+          DTBSZ="$(stat -c%s "$DTB_PATH")"
+          echo "追加设备树：$DTB_PATH（$DTBSZ 字节）"
+          if [ "$DTBSZ" -gt 1048576 ]; then
+            echo "::warning::设备树超过 1MB，自解压代码会拒绝使用追加的设备树"
+          fi
+
+          cat "$Z" "$DTB_PATH" > arch/arm/boot/zImage-dtb
+
+          # 追加结果自检：魔数位置、totalsize 与实际追加长度必须三方一致
+          python3 -c "import struct;b=open('arch/arm/boot/zImage-dtb','rb').read();off=int('$EXPECT_OFF');sig=b[off:off+4];assert sig==b'\xd0\x0d\xfe\xed','offset %d has no DTB magic: %r' % (off,sig);tot=struct.unpack('>I',b[off+4:off+8])[0];assert tot==len(b)-off,'DTB totalsize %d != appended %d' % (tot,len(b)-off);print('DTB 位置与长度校验通过：offset=%d totalsize=%d' % (off,tot))"
+          # 1. zImage 内核镜像（内核自解压格式，不含设备树，留档用）
+          cp "$Z" out/
+          # 2. uImage 内核镜像（zImage+设备树，外面加 64 字节 U-Boot 头）
           if ! command -v mkimage >/dev/null 2>&1; then
             echo "::error::未找到 mkimage，请确认已安装 u-boot-tools"
             exit 1
@@ -187,12 +234,8 @@ jobs:
           mkimage -A arm -O linux -T kernel -C none \
             -a "$UIMAGE_LOADADDR" -e "$UIMAGE_LOADADDR" \
             -n "Linux-${KREL}" \
-            -d arch/arm/boot/zImage out/uImage
-          # 3. dtb 设备树（缺板级补丁时这里会直接报错）
-          if ! ls arch/arm/boot/dts/hisilicon/*.dtb >/dev/null 2>&1; then
-            echo "::error::未生成 hisilicon 设备树，请检查补丁与 config"
-            exit 1
-          fi
+            -d arch/arm/boot/zImage-dtb out/uImage
+          # 3. dtb 设备树（单独留档）
           cp arch/arm/boot/dts/hisilicon/*.dtb out/
           # 4. config 内核配置
           cp .config "out/config-${KREL}-hi3798mv100"
@@ -205,6 +248,8 @@ jobs:
           ls -lh out/
           echo "=== uImage 头信息 ==="
           mkimage -l out/uImage
+          echo "=== uImage 尾部是否确为设备树 ==="
+          python3 -c "d=open('out/uImage','rb').read();zl=int('$EXPECT_OFF');print('uImage 总长 %d = 头 64 + zImage %d + 设备树 %d' % (len(d),zl,len(d)-64-zl));print('偏移 %d 处魔数: %s' % (64+zl,d[64+zl:64+zl+4].hex()))"
 
       - name: 生成发布说明
         run: |
@@ -217,23 +262,24 @@ jobs:
           | baseline 版本 | ${KVER} |
           | 内核标签 | ${KERNEL_TAG} |
           | baseline 基准 | ${BASE_SHA} |
+          | uImage 加载/入口地址 | ${UIMAGE_LOADADDR} |
+          | 内嵌设备树 | ${TARGET_DTB} |
           | 补丁来源 | histb-mainline/patches 官方补丁库 |
           | 补丁提交 | ${{ github.event.inputs.patches_commit || 'master 最新提交' }} |
           | 构建时间 | $(date -u +%Y-%m-%dT%H:%M:%SZ) |
           | 交叉工具链 | arm-linux-gnueabihf- |
-          | uImage 加载地址 | ${UIMAGE_LOADADDR} |
 
           ### 产物清单
-          - \`zImage\`：内核镜像，内核自解压格式
-          - \`uImage\`：**直接刷入内核分区**，dd if=uImage of=/dev/mmcblk0p6
-          - \`*.dtb\`：设备树，Hi3798MV100 板级设备树以 hi3798mv100 开头
+          - \`uImage\`：**直接刷入内核分区**，已内嵌设备树，dd if=uImage of=/dev/mmcblk0p6
+          - \`zImage\`：不含设备树的内核自解压镜像，仅留档
+          - \`*.dtb\`：单独的板级设备树文件，留档
           - \`config-*\`：本次内核配置
-          - \`modules.tar.gz\`：内核模块，解压到根目录/
+          - \`modules.tar.gz\`：内核模块，解压到板端根目录 /
 
           ### 刷机提示
           1. 刷写前务必备份原机固件与分区表
-          2. uImage 直接写入 kernel 分区（/dev/mmcblk0p6），无需任何额外处理
-          3. modules.tar.gz 解压后整体放到板端根目录（/）
+          2. uImage 直接写入 kernel 分区，不需要再单独刷 dtb
+          3. modules.tar.gz 解压后整体放到板端根目录（/），重启前先解压
           EOF
 
       - name: 上传构建产物
