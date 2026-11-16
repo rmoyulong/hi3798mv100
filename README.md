@@ -1,5 +1,5 @@
-海思Hi3798MV100(九联-UNT400B) 内核和模块、DTB编译 <br><br>
-Open-source software/firmware for HiSilicon Hi3716 / Hi3796 / Hi3798 devices
+海思Hi3798MV100(九联-UNT400B) 内核和模块、DTB编译 <br>
+Open-source software/firmware for HiSilicon Hi3716 / Hi3796 / Hi3798 devices<br>
 [![build](https://img.shields.io/github/actions/workflow/status/rmoyulong/hi3798mv100/hisi.yml)](https://github.com/rmoyulong/hi3798mv100/actions/workflows/hisi.yml) [![downloads](https://img.shields.io/github/downloads/rmoyulong/hi3798mv100/total)](https://github.com/rmoyulong/hi3798mv100/releases) [![downloads@latest](https://img.shields.io/github/downloads/rmoyulong/hi3798mv100/latest/total)](https://github.com/rmoyulong/hi3798mv100/releases/latest)<br>
 
 本仓库编译的是九联-UNT400B，其他板子的参数请按照实际情况编写！
