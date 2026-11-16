@@ -24,7 +24,7 @@ jobs:
       # === 补丁仓库基线，与你贴的baseline完全一致 ===
       PATCHES_BASE_SHA: fd9230005e85472b81c1c7c16afe93dd878996b1
       PATCHES_KERNEL_VERSION: 7.4-rc2
-      PATCHES_REPO: https://github.com/rmoyulong/hisilicon-linux-mainline.git
+      PATCHES_REPO: https://github.com/rmoyulong/histb-mainline_patches
     steps:
       - name: 检出仓库代码
         uses: actions/checkout@v4
