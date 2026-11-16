@@ -2,7 +2,6 @@ name: Hi3798MV100 内核自动构建
 
 on:
   push:
-    # 兼容master和main分支，默认分支是master
     branches: [ master, main ]
     paths:
       - '.github/workflows/hisi.yml'
@@ -62,16 +61,14 @@ jobs:
           if [ -n "${{ github.event.inputs.patches_commit }}" ]; then
             git -C histb-hi3798-patches checkout "${{ github.event.inputs.patches_commit }}"
           fi
-          echo "=== 补丁目录文件列表 ==="
-          ls -1 histb-hi3798-patches/*.patch | head -30
+          echo "=== 补丁总数统计 ==="
+          ls -1 histb-hi3798-patches/*.patch | wc -l
 
-      # 打补丁时内核目录完全纯净，不会触发git脏工作区检查
       - name: 应用Hi3798MV100补丁
         env:
           CI: "true"
           PATCHES_DIR: ${{ github.workspace }}/histb-hi3798-patches
           LOG_FILE: ${{ github.workspace }}/patch_apply.log
-          KERNEL_VERSION_REQUIRED: "v7.4"
         run: |
           chmod +x apply_hi3798mv100_v7.4_patches.sh
           cd linux_build
@@ -100,18 +97,13 @@ jobs:
           rm -rf out
           mkdir -p out
           KREL="$(make -s kernelrelease)"
-          # 1. zImage内核镜像
           cp arch/arm/boot/zImage out/
-          # 2. dtb设备树
           cp arch/arm/boot/dts/hisilicon/*.dtb out/
-          # 3. config内核配置
           cp .config "out/config-${KREL}-hi3798mv100"
-          # 4. modules.tar.gz内核模块
           make INSTALL_MOD_PATH="$PWD/out/_mod" modules_install
           rm -f out/_mod/lib/modules/*/build out/_mod/lib/modules/*/source
           tar -czf out/modules.tar.gz -C out/_mod .
           rm -rf out/_mod
-          echo "=== 产物列表 ==="
           ls -lh out/
 
       - name: 生成发布说明
