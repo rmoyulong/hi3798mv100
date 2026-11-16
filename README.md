@@ -1,8 +1,8 @@
 海思Hi3798MV100 内核和模块、DTB编译
 Open-source software/firmware for HiSilicon Hi3716 / Hi3796 / Hi3798 devices
 
-linux仓库: https://github.com/torvalds/linux.git <br>
-海思的补丁仓库: https://github.com/histb-mainline/patches.git <br>
+- \`linux仓库\`： https://github.com/torvalds/linux.git <br>
+- \`海思的补丁仓库\`： https://github.com/histb-mainline/patches.git <br>
 ==================================================================================
 补丁库是一整条有序序列，缺一个后面全冲突
 补丁都放在根目录，靠 000 到 955 的文件名序号决定顺序，后一个的上下文建立在前一个的改动之上。
