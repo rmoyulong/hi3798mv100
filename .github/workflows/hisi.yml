@@ -4,7 +4,9 @@ name: Hi3798MV100 内核自动构建
 # 1) 基线跟随补丁库 baseline：KERNEL_VERSION = 7.4-rc2，BASE_SHA = fd9230005e85...
 # 2) 版本校验改为"规范化后比较"（去掉 X.Y.0 里的 .0），
 #    因此 7.4-rc2 与内核自报的 7.4.0-rc2 视为同一版本，两种写法都能通过
-# 3) 补丁应用调用仓库根目录的 apply_histb_patches.sh，由它按 series 严格应用
+# 3) 补丁库已重构为"根目录平铺 quilt 库"：无 pending-7.4/hack-7.4 桶目录，
+#    也没有 series 文件；补丁应用继续调用仓库根目录的 apply_histb_patches.sh，
+#    由它按文件名序号排序应用根目录全部 *.patch（有 series 则按 series）
 # 4) uImage 保持加载/入口 0x02000000、-C none，设备树追加在 zImage 末尾
 
 on:
@@ -86,18 +88,35 @@ jobs:
           git clone --depth 1 "$PATCHES_REPO" histb-patches
           echo "=== 补丁库 baseline ==="
           grep -E 'KERNEL_VERSION|BASE_SHA' histb-patches/baseline || true
-          echo "=== 补丁桶抽检 ==="
-          ls histb-patches/pending-7.4/*.patch 2>/dev/null | head -3
-          ls histb-patches/hack-7.4/*.patch 2>/dev/null | head -3
+          echo "=== 补丁库布局检查（重构后为根目录平铺，无桶目录）==="
+          ls -1 histb-patches | head -10
+          N=$(find histb-patches -maxdepth 1 -name '*.patch' -type f | wc -l)
+          echo "根目录补丁数量：$N"
+          if [ "$N" -eq 0 ]; then
+            echo "::error::补丁库根目录下没有 .patch 文件"
+            exit 1
+          fi
+          if [ -f histb-patches/quilt.conf ]; then
+            echo "quilt.conf 存在（--fuzz=0）"
+          else
+            echo "::warning::未见 quilt.conf"
+          fi
+          if [ -f histb-patches/series ]; then
+            echo "存在 series，将按 series 顺序应用"
+          else
+            echo "无 series，脚本将按文件名序号排序应用全部补丁"
+          fi
 
-      - name: 应用 histb 补丁（调用根目录脚本，严格按 series 应用）
+      - name: 应用 histb 补丁（调用仓库根目录 apply_histb_patches.sh）
         run: |
           set -euo pipefail
           cd linux_build
+          # 该脚本自判：有 series 按 series，没有则按文件名序号应用根目录全部 *.patch；
+          # 等价于 quilt --fuzz=0，遇冲突即中止并回滚，不会静默产出缺补丁的内核
           PATCHES_DIR="../histb-patches" CI=true bash ../apply_histb_patches.sh -y
           echo "=== 板级 dts 检查 ==="
-          ls arch/arm/boot/dts/hisilicon/hi3798mv100*.dts 2>/dev/null | head -10
-          grep -l "ec6108" arch/arm/boot/dts/hisilicon/*.dts 2>/dev/null | head -3 || true
+          ls arch/arm/boot/dts/hisilicon/hi3798mv100*.dts 2>/dev/null || true
+          grep -l "ec6108" arch/arm/boot/dts/hisilicon/*.dts 2>/dev/null || true
 
       - name: 部署内核配置并强制关键驱动内置
         run: |
