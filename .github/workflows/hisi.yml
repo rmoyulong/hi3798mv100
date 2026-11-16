@@ -61,7 +61,7 @@ jobs:
             gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
             bc bison flex libssl-dev libncurses5-dev ccache kmod \
             u-boot-tools device-tree-compiler quilt git wget xz-utils
-          arm-linux-gnueabihf-gcc --version | head -1
+          arm-linux-gnueabihf-gcc --version | awk 'NR==1{print; exit}'
 
       - name: 拉取内核源码（匹配补丁基线 commit）
         run: |
@@ -89,7 +89,14 @@ jobs:
           echo "=== 补丁库 baseline ==="
           grep -E 'KERNEL_VERSION|BASE_SHA' histb-patches/baseline || true
           echo "=== 补丁库布局检查（重构后为根目录平铺，无桶目录）==="
-          ls -1 histb-patches | head -10
+          # 用数组取前10个文件，避免管道head触发SIGPIPE
+          files=(histb-patches/*)
+          cnt=0
+          for f in "${files[@]}"; do
+            [ $cnt -ge 10 ] && break
+            echo "${f##histb-patches/}"
+            cnt=$((cnt+1))
+          done
           N=$(find histb-patches -maxdepth 1 -name '*.patch' -type f | wc -l)
           echo "根目录补丁数量：$N"
           if [ "$N" -eq 0 ]; then
