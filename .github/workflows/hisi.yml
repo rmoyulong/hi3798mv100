@@ -2,19 +2,20 @@ name: Hi3798MV100 内核自动构建
 
 on:
   push:
+    # 兼容 master 与 main，默认分支推哪个都触发
     branches: [ master, main ]
     paths:
       - '.github/workflows/hisi.yml'
-      - 'apply_hi3798mv100_v7.4_patches.sh'
+      - 'apply_histb_patches.sh'
       - 'kernel.config'
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: '内核版本标签'
-        required: true
-        default: 'v7.4-rc1'
+        description: '内核版本，留空 = 按补丁仓库 baseline 自动选择'
+        required: false
+        default: ''
       patches_commit:
-        description: '补丁仓库Commit哈希（留空则用最新master分支）'
+        description: '补丁仓库 commit，留空 = master 最新'
         required: false
         default: ''
   release:
@@ -30,19 +31,71 @@ jobs:
     env:
       ARCH: arm
       CROSS_COMPILE: arm-linux-gnueabihf-
-      KVER: "${{ github.event.inputs.kernel_version || 'v7.4-rc1' }}"
+      KERNEL_REPO: https://github.com/torvalds/linux.git
     steps:
-      - name: 检出你的仓库代码
+      - name: 检出仓库代码
         uses: actions/checkout@v4
 
-      - name: 安装ARM32交叉编译依赖
+      - name: 安装 ARM32 交叉编译依赖
         run: |
-          sudo apt update
-          sudo apt install -y \
+          sudo apt-get update
+          sudo apt-get install -y \
             gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
             bc bison flex libssl-dev libncurses5-dev ccache kmod u-boot-tools
 
-      - name: 恢复ccache编译缓存
+      # 内核版本完全由补丁仓库的 baseline 决定，不再写死在 YAML 里
+      - name: 拉取补丁仓库并解析 baseline
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.kernel_version }}
+          PATCHES_COMMIT: ${{ github.event.inputs.patches_commit }}
+        run: |
+          set -euo pipefail
+          git clone https://github.com/histb-mainline/patches.git histb-hi3798-patches
+          if [ -n "$PATCHES_COMMIT" ]; then
+            git -C histb-hi3798-patches checkout "$PATCHES_COMMIT"
+          fi
+          echo "补丁仓库提交：$(git -C histb-hi3798-patches rev-parse --short HEAD)"
+
+          BL=histb-hi3798-patches/baseline
+          if [ ! -f "$BL" ]; then
+            echo "::error::补丁仓库中未找到 baseline 文件"
+            exit 1
+          fi
+          BASE_VERSION="$(sed -n 's/^[[:space:]]*KERNEL_VERSION[[:space:]]*:=[[:space:]]*//p' "$BL" | head -1 | tr -d '\r' | xargs)"
+          BASE_SHA="$(sed -n 's/^[[:space:]]*BASE_SHA[[:space:]]*:=[[:space:]]*//p' "$BL" | head -1 | tr -d '\r' | xargs)"
+          echo "baseline 内核版本：${BASE_VERSION:-（缺失）}"
+          echo "baseline 基准对象：${BASE_SHA:-（缺失）}"
+
+          if [ -n "$INPUT_VERSION" ]; then
+            KVER="$INPUT_VERSION"
+            echo "使用手动指定版本覆盖 baseline"
+          else
+            KVER="$BASE_VERSION"
+          fi
+          KVER="${KVER#v}"
+          if [ -z "$KVER" ]; then
+            echo "::error::未能从 baseline 解析出 KERNEL_VERSION"
+            exit 1
+          fi
+          KERNEL_TAG="v$KVER"
+          if ! git ls-remote --exit-code --tags "$KERNEL_REPO" "refs/tags/$KERNEL_TAG" >/dev/null; then
+            echo "::error::$KERNEL_REPO 中不存在标签 $KERNEL_TAG"
+            exit 1
+          fi
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+          echo "KERNEL_TAG=$KERNEL_TAG" >> "$GITHUB_ENV"
+          echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
+          {
+            echo "## 本次构建基线"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| baseline 内核版本 | $BASE_VERSION |"
+            echo "| 实际使用标签 | $KERNEL_TAG |"
+            echo "| baseline 基准对象 | $BASE_SHA |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 恢复 ccache 缓存
         uses: actions/cache@v4
         with:
           path: ~/.ccache
@@ -51,28 +104,36 @@ jobs:
             ${{ runner.os }}-ccache-${{ env.KVER }}-
             ${{ runner.os }}-ccache-
 
-      - name: 拉取Linux内核源码
+      - name: 拉取内核源码（按 baseline 版本）
         run: |
-          git clone --branch "$KVER" https://github.com/torvalds/linux.git linux_build
+          git clone --branch "$KERNEL_TAG" "$KERNEL_REPO" linux_build
 
-      - name: 拉取histb官方补丁仓库
+      - name: 校验内核树与 baseline 基准一致
         run: |
-          git clone https://github.com/histb-mainline/patches.git histb-hi3798-patches
-          if [ -n "${{ github.event.inputs.patches_commit }}" ]; then
-            git -C histb-hi3798-patches checkout "${{ github.event.inputs.patches_commit }}"
+          set -euo pipefail
+          if [ -z "${BASE_SHA:-}" ]; then
+            echo "::warning::baseline 未提供 BASE_SHA，跳过基准校验"
+            exit 0
           fi
-          echo "=== 补丁总数统计 ==="
-          ls -1 histb-hi3798-patches/*.patch | wc -l
+          TAG_OBJ="$(git -C linux_build rev-parse "$KERNEL_TAG")"
+          echo "本地标签对象：$TAG_OBJ"
+          echo "baseline 基准：$BASE_SHA"
+          if [ "$TAG_OBJ" = "$BASE_SHA" ]; then
+            echo "内核树与 baseline 完全一致"
+          else
+            echo "::warning::内核树与 baseline 基准不一致，补丁可能出现上下文差异"
+          fi
 
-      - name: 应用Hi3798MV100补丁
+      # 脚本与日志都不落在 linux_build 内，内核 git 工作区保持干净
+      - name: 应用 histb 补丁
         env:
           CI: "true"
           PATCHES_DIR: ${{ github.workspace }}/histb-hi3798-patches
           LOG_FILE: ${{ github.workspace }}/patch_apply.log
         run: |
-          chmod +x apply_hi3798mv100_v7.4_patches.sh
+          chmod +x apply_histb_patches.sh
           cd linux_build
-          bash ../apply_hi3798mv100_v7.4_patches.sh
+          bash ../apply_histb_patches.sh
 
       - name: 部署内核配置并补全依赖
         run: |
@@ -86,9 +147,9 @@ jobs:
           export CCACHE_DIR="$HOME/.ccache"
           ccache --max-size=5G
           ccache -z
-          make -j$(nproc) CROSS_COMPILE="ccache $CROSS_COMPILE" zImage
-          make -j$(nproc) CROSS_COMPILE="ccache $CROSS_COMPILE" dtbs
-          make -j$(nproc) CROSS_COMPILE="ccache $CROSS_COMPILE" modules
+          make -j"$(nproc)" CROSS_COMPILE="ccache $CROSS_COMPILE" zImage
+          make -j"$(nproc)" CROSS_COMPILE="ccache $CROSS_COMPILE" dtbs
+          make -j"$(nproc)" CROSS_COMPILE="ccache $CROSS_COMPILE" modules
           ccache -s
 
       - name: 整理四类独立产物
@@ -97,54 +158,57 @@ jobs:
           rm -rf out
           mkdir -p out
           KREL="$(make -s kernelrelease)"
+          # 1. zImage 内核镜像
           cp arch/arm/boot/zImage out/
+          # 2. dtb 设备树（缺板级补丁时这里会直接报错）
+          if ! ls arch/arm/boot/dts/hisilicon/*.dtb >/dev/null 2>&1; then
+            echo "::error::未生成 hisilicon 设备树，请检查补丁与 config"
+            exit 1
+          fi
           cp arch/arm/boot/dts/hisilicon/*.dtb out/
+          # 3. config 内核配置
           cp .config "out/config-${KREL}-hi3798mv100"
+          # 4. modules.tar.gz 内核模块
           make INSTALL_MOD_PATH="$PWD/out/_mod" modules_install
           rm -f out/_mod/lib/modules/*/build out/_mod/lib/modules/*/source
           tar -czf out/modules.tar.gz -C out/_mod .
           rm -rf out/_mod
+          echo "=== 产物列表 ==="
           ls -lh out/
 
       - name: 生成发布说明
         run: |
           cat > linux_build/release_notes.md <<EOF
           ## 海思 Hi3798MV100 内核构建
+
           | 项目 | 内容 |
           | --- | --- |
           | 芯片平台 | Hi3798MV100（ARMv7） |
-          | 内核版本 | ${KVER} |
-          | 补丁来源 | histb-mainline/patches 官方主线 |
-          | 补丁提交 | ${{ github.event.inputs.patches_commit || 'master分支最新提交' }} |
+          | baseline 版本 | ${KVER} |
+          | 内核标签 | ${KERNEL_TAG} |
+          | baseline 基准 | ${BASE_SHA} |
+          | 补丁来源 | histb-mainline/patches 官方补丁库 |
+          | 补丁提交 | ${{ github.event.inputs.patches_commit || 'master 最新提交' }} |
           | 构建时间 | $(date -u +%Y-%m-%dT%H:%M:%SZ) |
           | 交叉工具链 | arm-linux-gnueabihf- |
+
           ### 产物清单
           - \`zImage\`：内核镜像
-          - \`*.dtb\`：设备树文件
+          - \`*.dtb\`：设备树，Hi3798MV100 板级设备树以 hi3798mv100 开头
           - \`config-*\`：本次内核配置
-          - \`modules.tar.gz\`：内核模块压缩包
+          - \`modules.tar.gz\`：内核模块
+
           ### 刷机提示
           1. 刷写前务必备份原机固件与分区表
-          2. zImage和dtb按对应分区写入
-          3. modules.tar.gz解压后整体放到板端/lib/modules/目录
+          2. zImage 与 dtb 按对应分区写入
+          3. modules.tar.gz 解压后整体放到板端 /lib/modules/
           EOF
 
-      - name: 上传构建产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: hi3798mv100-linux-7.4
-          if-no-files-found: error
-          retention-days: 90
-          path: |
-            linux_build/out/zImage
-            linux_build/out/*.dtb
-            linux_build/out/config-*
-            linux_build/out/modules.tar.gz
-
-      - name: 发布到GitHub Release
+      - name: 发布到 GitHub Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: latest
           body_path: linux_build/release_notes.md
           generate_release_notes: true
           files: |
