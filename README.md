@@ -1,4 +1,4 @@
-海思Hi3798MV100 内核和模块、DTB编译
+海思Hi3798MV100 内核和模块、DTB编译 <br>
 Open-source software/firmware for HiSilicon Hi3716 / Hi3796 / Hi3798 devices
 
 - \`linux仓库\`： https://github.com/torvalds/linux.git <br>
