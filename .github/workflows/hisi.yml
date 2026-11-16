@@ -32,6 +32,9 @@ jobs:
       ARCH: arm
       CROSS_COMPILE: arm-linux-gnueabihf-
       KERNEL_REPO: https://github.com/torvalds/linux.git
+      # uImage 头里写入的加载/入口地址，取自实机可启动镜像的 Load Address / Entry Point
+      # 必须加引号，否则 YAML 会把它当十进制整数，写进头里就不是 0x02000000
+      UIMAGE_LOADADDR: "0x02000000"
     steps:
       - name: 检出仓库代码
         uses: actions/checkout@v4
@@ -140,24 +143,7 @@ jobs:
           set -euo pipefail
           cd linux_build
           cp ../kernel.config .config
-
-          # 情况一：板子不用这颗外部 HDMI 发送器（设备树无引用时优先用这个）
-          scripts/config --disable DRM_SII9134
-
-          # 情况二：板子需要它，打开它引用的 HDMI 辅助层
-          #scripts/config --enable DRM_DISPLAY_HELPER --enable DRM_DISPLAY_HDMI_HELPER
-
           make olddefconfig
-
-          echo "=== 相关开关最终取值 ==="
-          for s in DRM DRM_KMS_HELPER DRM_DISPLAY_HELPER DRM_DISPLAY_HDMI_HELPER DRM_SII9134; do
-            printf '%-28s %s\n' "$s" "$(grep -E "^CONFIG_${s}=|^# CONFIG_${s} is not set" .config || echo '（不存在）')"
-          done
-          if grep -q '^CONFIG_DRM_SII9134=y' .config && ! grep -q '^CONFIG_DRM_DISPLAY_HDMI_HELPER=y' .config; then
-            echo "::error::DRM_SII9134 已启用但 HDMI 辅助层未启用"
-            exit 1
-          fi
-
 
       - name: 编译内核、设备树、模块
         run: |
@@ -170,29 +156,41 @@ jobs:
           make -j"$(nproc)" CROSS_COMPILE="ccache $CROSS_COMPILE" modules
           ccache -s
 
-      - name: 整理四类独立产物
+      - name: 整理五类独立产物
         run: |
+          set -euo pipefail
           cd linux_build
           rm -rf out
           mkdir -p out
           KREL="$(make -s kernelrelease)"
-          # 1. zImage 内核镜像
+          # 1. zImage 内核镜像（内核自解压格式）
           cp arch/arm/boot/zImage out/
-          # 2. dtb 设备树（缺板级补丁时这里会直接报错）
+          # 2. uImage 内核镜像（U-Boot 格式，在 zImage 前加 64 字节头）
+          if ! command -v mkimage >/dev/null 2>&1; then
+            echo "::error::未找到 mkimage，请确认已安装 u-boot-tools"
+            exit 1
+          fi
+          mkimage -A arm -O linux -T kernel -C none \
+            -a "$UIMAGE_LOADADDR" -e "$UIMAGE_LOADADDR" \
+            -n "Linux-${KREL}" \
+            -d arch/arm/boot/zImage out/uImage
+          # 3. dtb 设备树（缺板级补丁时这里会直接报错）
           if ! ls arch/arm/boot/dts/hisilicon/*.dtb >/dev/null 2>&1; then
             echo "::error::未生成 hisilicon 设备树，请检查补丁与 config"
             exit 1
           fi
           cp arch/arm/boot/dts/hisilicon/*.dtb out/
-          # 3. config 内核配置
+          # 4. config 内核配置
           cp .config "out/config-${KREL}-hi3798mv100"
-          # 4. modules.tar.gz 内核模块
+          # 5. modules.tar.gz 内核模块
           make INSTALL_MOD_PATH="$PWD/out/_mod" modules_install
           rm -f out/_mod/lib/modules/*/build out/_mod/lib/modules/*/source
           tar -czf out/modules.tar.gz -C out/_mod .
           rm -rf out/_mod
           echo "=== 产物列表 ==="
           ls -lh out/
+          echo "=== uImage 头信息 ==="
+          mkimage -l out/uImage
 
       - name: 生成发布说明
         run: |
@@ -209,17 +207,19 @@ jobs:
           | 补丁提交 | ${{ github.event.inputs.patches_commit || 'master 最新提交' }} |
           | 构建时间 | $(date -u +%Y-%m-%dT%H:%M:%SZ) |
           | 交叉工具链 | arm-linux-gnueabihf- |
+          | uImage 加载地址 | ${UIMAGE_LOADADDR} |
 
           ### 产物清单
-          - \`zImage\`：内核镜像
+          - \`zImage\`：内核镜像，内核自解压格式
+          - \`uImage\`：内核镜像，U-Boot 格式（比 zImage 多 64 字节头）
           - \`*.dtb\`：设备树，Hi3798MV100 板级设备树以 hi3798mv100 开头
           - \`config-*\`：本次内核配置
           - \`modules.tar.gz\`：内核模块
 
           ### 刷机提示
           1. 刷写前务必备份原机固件与分区表
-          2. zImage 与 dtb 按对应分区写入
-          3. modules.tar.gz 解压后整体放到板端 /lib/modules/
+          2. 引导程序要 U-Boot 格式就写 uImage，要自解压格式就写 zImage，两者择一，不要都写
+          3. dtb 按设备树分区写入，modules.tar.gz 解压后整体放到板端 /lib/modules/
           EOF
 
       - name: 发布到 GitHub Release
@@ -231,7 +231,7 @@ jobs:
           generate_release_notes: true
           files: |
             linux_build/out/zImage
+            linux_build/out/uImage
             linux_build/out/*.dtb
             linux_build/out/config-*
             linux_build/out/modules.tar.gz
-
