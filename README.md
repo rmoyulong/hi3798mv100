@@ -2,6 +2,7 @@
 Open-source software/firmware for HiSilicon Hi3716 / Hi3796 / Hi3798 devices
 
 linux仓库： https://github.com/torvalds/linux.git
+
 海思的补丁仓库： https://github.com/histb-mainline/patches.git
 ==================================================================================
 补丁库是一整条有序序列，缺一个后面全冲突
