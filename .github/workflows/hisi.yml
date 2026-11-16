@@ -1,13 +1,18 @@
 name: Hi3798MV100 内核自动构建
 
-# 修订说明：
+# 修订说明（v4）：
 # 1) 基线跟随补丁库 baseline：KERNEL_VERSION = 7.4-rc2，BASE_SHA = fd9230005e85...
 # 2) 版本校验改为"规范化后比较"（去掉 X.Y.0 里的 .0），
-#    因此 7.4-rc2 与内核自报的 7.4.0-rc2 视为同一版本，两种写法都能通过
-# 3) 补丁库已重构为"根目录平铺 quilt 库"：无 pending-7.4/hack-7.4 桶目录，
-#    也没有 series 文件；补丁应用继续调用仓库根目录的 apply_histb_patches.sh，
-#    由它按文件名序号排序应用根目录全部 *.patch（有 series 则按 series）
-# 4) uImage 保持加载/入口 0x02000000、-C none，设备树追加在 zImage 末尾
+#    因此 7.4-rc2 与内核自报的 7.4.0-rc2 视为同一版本
+# 3) 补丁库为"根目录平铺 quilt 库"：无 pending-7.4/hack-7.4 桶目录、无 series；
+#    补丁应用继续调用仓库根目录的 apply_histb_patches.sh
+# 4) 【本版关键修正】eMMC 驱动符号：
+#    Hi3798MV100 的 mmc 节点 compatible = "hisilicon,hi3798cv200-dw-mshc"，
+#    对应 DesignWare MMC 的 CV200 扩展驱动，正确符号为
+#      CONFIG_MMC_DW=y / CONFIG_MMC_DW_PLTFM=y / CONFIG_MMC_DW_HI3798CV200=y
+#    内核里并不存在 CONFIG_MMC_HISI / CONFIG_MMC_HISI_SDHCI，已全部移除
+# 5) 去掉所有会提前关闭管道的 `| head`，避免 SIGPIPE 造成的假失败
+# 6) uImage 保持加载/入口 0x02000000、-C none，设备树追加在 zImage 末尾并校验 d00dfeed
 
 on:
   push:
@@ -50,8 +55,8 @@ jobs:
           for f in apply_histb_patches.sh kernel.config; do
             [ -f "$f" ] || { echo "::error::根目录缺少 $f"; exit 1; }
           done
-          ls -lh apply_histb_patches.sh kernel.config
           chmod +x apply_histb_patches.sh
+          ls -lh apply_histb_patches.sh kernel.config
 
       - name: 安装 ARM32 交叉编译依赖
         run: |
@@ -61,7 +66,7 @@ jobs:
             gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
             bc bison flex libssl-dev libncurses5-dev ccache kmod \
             u-boot-tools device-tree-compiler quilt git wget xz-utils
-          arm-linux-gnueabihf-gcc --version | awk 'NR==1{print; exit}'
+          arm-linux-gnueabihf-gcc --version | sed -n '1p'
 
       - name: 拉取内核源码（匹配补丁基线 commit）
         run: |
@@ -86,30 +91,26 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 "$PATCHES_REPO" histb-patches
+          cd histb-patches
           echo "=== 补丁库 baseline ==="
-          grep -E 'KERNEL_VERSION|BASE_SHA' histb-patches/baseline || true
-          echo "=== 补丁库布局检查（重构后为根目录平铺，无桶目录）==="
-          # 用数组取前10个文件，避免管道head触发SIGPIPE
-          files=(histb-patches/*)
-          cnt=0
-          for f in "${files[@]}"; do
-            [ $cnt -ge 10 ] && break
-            echo "${f##histb-patches/}"
-            cnt=$((cnt+1))
-          done
-          N=$(find histb-patches -maxdepth 1 -name '*.patch' -type f | wc -l)
-          echo "根目录补丁数量：$N"
-          if [ "$N" -eq 0 ]; then
+          grep -E 'KERNEL_VERSION|BASE_SHA' baseline || true
+          echo "=== 补丁库布局检查（根目录平铺 quilt 库）==="
+          # mapfile 一次读完，不用 head，避免 SIGPIPE
+          mapfile -t patches < <(find . -maxdepth 1 -name '*.patch' -type f | LC_ALL=C sort -V)
+          echo "根目录补丁数量：${#patches[@]}"
+          if [ "${#patches[@]}" -eq 0 ]; then
             echo "::error::补丁库根目录下没有 .patch 文件"
             exit 1
           fi
-          if [ -f histb-patches/quilt.conf ]; then
+          echo "前3个补丁："
+          for p in "${patches[@]:0:3}"; do echo "  $p"; done
+          if [ -f quilt.conf ]; then
             echo "quilt.conf 存在（--fuzz=0）"
           else
             echo "::warning::未见 quilt.conf"
           fi
-          if [ -f histb-patches/series ]; then
-            echo "存在 series，将按 series 顺序应用"
+          if [ -f series ]; then
+            echo "存在 series，脚本将按 series 顺序应用"
           else
             echo "无 series，脚本将按文件名序号排序应用全部补丁"
           fi
@@ -132,18 +133,25 @@ jobs:
           [ -f ../kernel.config ] || { echo "::error::仓库根目录缺少 kernel.config"; exit 1; }
           cp ../kernel.config .config
 
-          # 启动必需驱动一律编进内核（=y），不能是模块
+          # eMMC：mv100 的 mmc 节点 compatible = "hisilicon,hi3798cv200-dw-mshc"
+          #   -> DesignWare MMC 的 CV200 扩展驱动
+          scripts/config --enable MMC
+          scripts/config --enable MMC_BLOCK
+          scripts/config --enable MMC_DW
+          scripts/config --enable MMC_DW_PLTFM
+          scripts/config --enable MMC_DW_HI3798CV200
+          # 控制台串口
+          scripts/config --enable SERIAL_AMBA_PL011
+          scripts/config --enable SERIAL_AMBA_PL011_CONSOLE
+          # 根文件系统
+          scripts/config --enable EXT4_FS
+          scripts/config --enable EXT4_USE_FOR_EXT2
+          scripts/config --enable JBD2
+          scripts/config --enable FS_MBCACHE
+          # 追加设备树 / ATAG 兼容
           scripts/config --enable ARM_APPENDED_DTB
           scripts/config --enable ARM_ATAG_DTB_COMPAT
           scripts/config --enable USE_OF
-          scripts/config --enable SERIAL_AMBA_PL011
-          scripts/config --enable SERIAL_AMBA_PL011_CONSOLE
-          scripts/config --enable MMC
-          scripts/config --enable MMC_HISI
-          scripts/config --enable MMC_SDHCI
-          scripts/config --enable MMC_SDHCI_PLTFM
-          scripts/config --enable EXT4_FS
-          scripts/config --enable EXT4_USE_FOR_EXT2
           scripts/config --disable RANDOMIZE_BASE
           # 启动参数交给 bootargs 分区传，不在内核里写死 root=
           scripts/config --set-str CMDLINE ""
@@ -153,9 +161,19 @@ jobs:
           make olddefconfig
 
           echo "=== 关键配置最终取值 ==="
-          for s in ARM_APPENDED_DTB SERIAL_AMBA_PL011 SERIAL_AMBA_PL011_CONSOLE MMC_HISI EXT4_FS; do
-            grep -E "^CONFIG_${s}=" .config || { echo "::error::CONFIG_$s 未开启"; exit 1; }
+          for s in ARM_APPENDED_DTB ARM_ATAG_DTB_COMPAT USE_OF \
+                   SERIAL_AMBA_PL011 SERIAL_AMBA_PL011_CONSOLE \
+                   MMC MMC_BLOCK MMC_DW MMC_DW_PLTFM MMC_DW_HI3798CV200 \
+                   EXT4_FS JBD2 FS_MBCACHE; do
+            if grep -qE "^CONFIG_${s}=y$" .config; then
+              echo "OK   CONFIG_${s}=y"
+            else
+              echo "::error::CONFIG_$s 未开启"
+              exit 1
+            fi
           done
+          echo "=== 最终内核版本 ==="
+          make -s kernelrelease
 
       - name: 编译内核、设备树、模块
         run: |
