@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: '内核版本（默认7.3.0，和作者验证版一致）'
+        description: '内核版本（默认7.3-rc7，和作者验证版一致）'
         required: false
-        default: '7.3'
+        default: '7.3-rc7'
 
 permissions:
   contents: write
@@ -23,7 +23,7 @@ jobs:
     env:
       ARCH: arm
       CROSS_COMPILE: arm-linux-gnueabihf-
-      # 固定地址，与作者7.3.0镜像一致
+      # 固定地址，与作者7.3-rc7镜像一致
       UIMAGE_LOADADDR: "0x02000000"
       TARGET_DTB: hi3798mv100-ec6108v9c.dtb
       # 作者仓库地址
@@ -64,7 +64,7 @@ jobs:
           cd linux_build
           echo "内核版本：$(make kernelversion)"
 
-      - name: 应用histb补丁（对应7.3版本分支）
+      - name: 应用histb补丁（对应7.3-rc7版本分支）
         run: |
           set -euo pipefail
           git clone --depth 1 --branch master https://github.com/histb-mainline/patches.git histb-patches
