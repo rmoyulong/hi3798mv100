@@ -1,5 +1,12 @@
 name: Hi3798MV100 内核自动构建
 
+# 修订说明：
+# 1) 基线跟随补丁库 baseline：KERNEL_VERSION = 7.4-rc2，BASE_SHA = fd9230005e85...
+# 2) 版本校验改为"规范化后比较"（去掉 X.Y.0 里的 .0），
+#    因此 7.4-rc2 与内核自报的 7.4.0-rc2 视为同一版本，两种写法都能通过
+# 3) 补丁应用调用仓库根目录的 apply_histb_patches.sh，由它按 series 严格应用
+# 4) uImage 保持加载/入口 0x02000000、-C none，设备树追加在 zImage 末尾
+
 on:
   push:
     branches: [ master, main ]
@@ -19,12 +26,16 @@ jobs:
     env:
       ARCH: arm
       CROSS_COMPILE: arm-linux-gnueabihf-
-      UIMAGE_LOADADDR: "0x02000000"
-      TARGET_DTB: hi3798mv100-ec6108v9c.dtb
-      # === 补丁仓库基线，与你贴的baseline完全一致 ===
+      KERNEL_REPO: https://github.com/torvalds/linux.git
+      # 补丁仓库（你改名后的地址）
+      PATCHES_REPO: https://github.com/rmoyulong/histb-mainline_patches
+      # 与补丁库 baseline 逐字一致
       PATCHES_BASE_SHA: fd9230005e85472b81c1c7c16afe93dd878996b1
       PATCHES_KERNEL_VERSION: 7.4-rc2
-      PATCHES_REPO: https://github.com/rmoyulong/histb-mainline_patches
+      # uImage 头内地址，与实机验证过的镜像一致
+      UIMAGE_LOADADDR: "0x02000000"
+      TARGET_DTB: hi3798mv100-ec6108v9c.dtb
+
     steps:
       - name: 检出仓库代码
         uses: actions/checkout@v4
@@ -35,75 +46,89 @@ jobs:
         run: |
           set -euo pipefail
           for f in apply_histb_patches.sh kernel.config; do
-            [ -f "$f" ] || { echo "错误：根目录缺少$f"; exit 1; }
+            [ -f "$f" ] || { echo "::error::根目录缺少 $f"; exit 1; }
           done
-          echo "根目录文件："
           ls -lh apply_histb_patches.sh kernel.config
           chmod +x apply_histb_patches.sh
 
-      - name: 安装ARM32交叉编译依赖
+      - name: 安装 ARM32 交叉编译依赖
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
-            bc bison flex libssl-dev libncurses5-dev ccache kmod u-boot-tools device-tree-compiler quilt \
-            git wget xz-utils
-          arm-linux-gnueabihf-gcc --version
+            bc bison flex libssl-dev libncurses5-dev ccache kmod \
+            u-boot-tools device-tree-compiler quilt git wget xz-utils
+          arm-linux-gnueabihf-gcc --version | head -1
 
-      - name: 拉取内核源码（严格匹配补丁基线commit）
+      - name: 拉取内核源码（匹配补丁基线 commit）
         run: |
           set -euo pipefail
           echo "拉取内核基线：$PATCHES_KERNEL_VERSION (commit: $PATCHES_BASE_SHA)"
-          # partial clone减少下载量，checkout到指定基线commit，和补丁仓库要求完全一致
-          git clone --filter=blob:none --no-checkout https://github.com/torvalds/linux.git linux_build
+          git clone --filter=blob:none --no-checkout "$KERNEL_REPO" linux_build
           cd linux_build
           git checkout -q "$PATCHES_BASE_SHA"
-          echo "源码版本校验："
-          make kernelversion
-          [ "$(make kernelversion)" = "$PATCHES_KERNEL_VERSION" ] || { echo "版本不匹配！预期$PATCHES_KERNEL_VERSION，实际$(make kernelversion)"; exit 1; }
+
+          # 规范化：7.4.0-rc2 -> 7.4-rc2，使两种写法等价
+          norm() { printf '%s' "$1" | sed -E 's/^([0-9]+\.[0-9]+)\.0/\1/'; }
+          ACT="$(make -s kernelversion)"
+          EXP="$PATCHES_KERNEL_VERSION"
+          echo "实际内核版本：$ACT ；baseline 期望：$EXP"
+          if [ "$(norm "$ACT")" != "$(norm "$EXP")" ]; then
+            echo "::error::版本不匹配：期望 $EXP，实际 $ACT"
+            exit 1
+          fi
+          echo "版本校验通过：$ACT"
 
       - name: 拉取补丁仓库
         run: |
           set -euo pipefail
           git clone --depth 1 "$PATCHES_REPO" histb-patches
-          echo "补丁仓库baseline校验："
-          cat histb-patches/baseline | grep -E 'KERNEL_VERSION|BASE_SHA'
-          # 验证patch目录存在
-          ls histb-patches/pending-7.4/*.patch | head -3
-          ls histb-patches/hack-7.4/*.patch | head -3
+          echo "=== 补丁库 baseline ==="
+          grep -E 'KERNEL_VERSION|BASE_SHA' histb-patches/baseline || true
+          echo "=== 补丁桶抽检 ==="
+          ls histb-patches/pending-7.4/*.patch 2>/dev/null | head -3
+          ls histb-patches/hack-7.4/*.patch 2>/dev/null | head -3
 
-      - name: 应用histb补丁（调用根目录apply_histb_patches.sh，严格按补丁规则）
+      - name: 应用 histb 补丁（调用根目录脚本，严格按 series 应用）
         run: |
           set -euo pipefail
           cd linux_build
-          # 设置补丁目录，调用项目根目录的脚本，自动处理fuzz=0/series/冲突回滚
           PATCHES_DIR="../histb-patches" CI=true bash ../apply_histb_patches.sh -y
-          echo "补丁应用完成，板级dts检查："
-          ls arch/arm/boot/dts/hisilicon/hi3798mv100*.dts | head -10
-          grep -l "ec6108" arch/arm/boot/dts/hisilicon/*.dts | head -3
+          echo "=== 板级 dts 检查 ==="
+          ls arch/arm/boot/dts/hisilicon/hi3798mv100*.dts 2>/dev/null | head -10
+          grep -l "ec6108" arch/arm/boot/dts/hisilicon/*.dts 2>/dev/null | head -3 || true
 
-      - name: 部署内核配置并强制关键启动驱动内置
+      - name: 部署内核配置并强制关键驱动内置
         run: |
           set -euo pipefail
           cd linux_build
+          [ -f ../kernel.config ] || { echo "::error::仓库根目录缺少 kernel.config"; exit 1; }
           cp ../kernel.config .config
 
-          # 强制启动必需驱动=Y，不能做成模块
-          scripts/config --enable SERIAL_AMBA_PL011 --enable SERIAL_AMBA_PL011_CONSOLE
-          scripts/config --enable MMC --enable MMC_HISI --enable MMC_SDHCI --enable MMC_SDHCI_PLTFM
-          scripts/config --enable EXT4_FS --enable EXT4_USE_FOR_EXT2
-          scripts/config --enable ARM_APPENDED_DTB --enable ARM_ATAG_DTB_COMPAT --enable USE_OF
+          # 启动必需驱动一律编进内核（=y），不能是模块
+          scripts/config --enable ARM_APPENDED_DTB
+          scripts/config --enable ARM_ATAG_DTB_COMPAT
+          scripts/config --enable USE_OF
+          scripts/config --enable SERIAL_AMBA_PL011
+          scripts/config --enable SERIAL_AMBA_PL011_CONSOLE
+          scripts/config --enable MMC
+          scripts/config --enable MMC_HISI
+          scripts/config --enable MMC_SDHCI
+          scripts/config --enable MMC_SDHCI_PLTFM
+          scripts/config --enable EXT4_FS
+          scripts/config --enable EXT4_USE_FOR_EXT2
           scripts/config --disable RANDOMIZE_BASE
-          # cmdline从bootargs分区取，不硬写
+          # 启动参数交给 bootargs 分区传，不在内核里写死 root=
           scripts/config --set-str CMDLINE ""
-          scripts/config --enable CMDLINE_FROM_BOOTLOADER --disable CMDLINE_FORCE
+          scripts/config --enable CMDLINE_FROM_BOOTLOADER
+          scripts/config --disable CMDLINE_FORCE
 
           make olddefconfig
 
-          echo "关键配置最终校验："
-          for s in SERIAL_AMBA_PL011 SERIAL_AMBA_PL011_CONSOLE MMC_HISI EXT4_FS ARM_APPENDED_DTB; do
-            grep -E "^CONFIG_${s}=" .config || { echo "CONFIG_$s未开启！"; exit 1; }
+          echo "=== 关键配置最终取值 ==="
+          for s in ARM_APPENDED_DTB SERIAL_AMBA_PL011 SERIAL_AMBA_PL011_CONSOLE MMC_HISI EXT4_FS; do
+            grep -E "^CONFIG_${s}=" .config || { echo "::error::CONFIG_$s 未开启"; exit 1; }
           done
 
       - name: 编译内核、设备树、模块
@@ -118,29 +143,37 @@ jobs:
           make -j"$(nproc)" CROSS_COMPILE="ccache $CROSS_COMPILE" modules
           ccache -s
 
-      - name: 打包uImage（严格对齐实机验证过的格式）
+      - name: 追加设备树并打包 uImage
         run: |
           set -euo pipefail
           cd linux_build
-          DTB_PATH="arch/arm/boot/dts/hisilicon/$TARGET_DTB"
-          [ ! -f "$DTB_PATH" ] && { echo "设备树不存在：$DTB_PATH"; ls arch/arm/boot/dts/hisilicon/hi3798mv100*.dtb; exit 1; }
-          
-          # 追加DTB到zImage末尾，校验魔数
-          cat arch/arm/boot/zImage "$DTB_PATH" > zImage-dtb
-          ZSIZE=$(stat -c%s arch/arm/boot/zImage)
-          DTB_MAGIC=$(dd if=zImage-dtb bs=1 skip=$ZSIZE count=4 2>/dev/null | od -A n -t x1 | tr -d ' \n\t')
-          echo "DTB魔数校验：$DTB_MAGIC（应为d00dfeed）"
-          [ "$DTB_MAGIC" != "d00dfeed" ] && { echo "DTB追加错误！"; exit 1; }
-          
-          # 打包uImage，地址0x02000000，无压缩，与能启动的7.3镜像格式一致
+          ZIMG=arch/arm/boot/zImage
+          DTB="arch/arm/boot/dts/hisilicon/$TARGET_DTB"
+          if [ ! -f "$DTB" ]; then
+            echo "::error::设备树不存在: $DTB"
+            ls arch/arm/boot/dts/hisilicon/hi3798mv100*.dtb
+            exit 1
+          fi
+
+          cat "$ZIMG" "$DTB" > zImage-dtb
+
+          ZSIZE=$(stat -c%s "$ZIMG")
+          DTB_SIZE=$(stat -c%s "$DTB")
+          MAGIC=$(dd if=zImage-dtb bs=1 skip="$ZSIZE" count=4 2>/dev/null | od -A n -t x1 | tr -d ' \n\t')
+          echo "zImage=$ZSIZE 字节, dtb=$DTB_SIZE 字节, 追加处魔数=$MAGIC"
+          if [ "$MAGIC" != "d00dfeed" ]; then
+            echo "::error::设备树追加位置错误，魔数不是 d00dfeed"
+            exit 1
+          fi
+
           mkimage -A arm -O linux -T kernel -C none \
             -a "$UIMAGE_LOADADDR" -e "$UIMAGE_LOADADDR" \
             -n "Linux-$PATCHES_KERNEL_VERSION-hi3798mv100" \
             -d zImage-dtb arch/arm/boot/uImage
-          
-          echo "=== uImage头校验 ==="
+
+          echo "=== uImage 头信息 ==="
           mkimage -l arch/arm/boot/uImage
-          echo "uImage大小：$(stat -c%s arch/arm/boot/uImage) 字节"
+          echo "uImage 总大小: $(stat -c%s arch/arm/boot/uImage) 字节（实机可启动镜像约 7328134 字节）"
 
       - name: 整理产物
         run: |
@@ -152,19 +185,19 @@ jobs:
           cp arch/arm/boot/uImage out/uImage
           cp arch/arm/boot/zImage out/zImage
           cp arch/arm/boot/dts/hisilicon/*.dtb out/
-          cp .config "out/config-${KREL}"
+          cp .config "out/config-$KREL"
           make INSTALL_MOD_PATH="$PWD/out/_mod" modules_install
           rm -f out/_mod/lib/modules/*/build out/_mod/lib/modules/*/source
           tar -czf out/modules.tar.gz -C out/_mod .
           rm -rf out/_mod
-          echo "=== 最终产物列表 ==="
+          echo "内核 release: $KREL"
+          echo "=== 产物列表 ==="
           ls -lh out/
-          echo "内核版本：$KREL"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: hi3798mv100-linux-7.4-rc2
+          name: hi3798mv100-linux-${{ env.PATCHES_KERNEL_VERSION }}
           if-no-files-found: error
           retention-days: 90
           path: linux_build/out/*
