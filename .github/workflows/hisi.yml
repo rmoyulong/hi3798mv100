@@ -134,6 +134,15 @@ jobs:
           ls arch/arm/boot/dts/hisilicon/hi3798mv100*.dts 2>/dev/null || true
           grep -l "ec6108" arch/arm/boot/dts/hisilicon/*.dts 2>/dev/null || true
 
+      - name: 恢复 ccache 缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: "${{ runner.os }}-ccache-${{ env.PATCHES_KERNEL_VERSION }}-${{ github.sha }}"
+          restore-keys: |
+            ${{ runner.os }}-ccache-${{ env.PATCHES_KERNEL_VERSION }}-
+            ${{ runner.os }}-ccache-
+            
       - name: 部署内核配置并强制关键驱动内置
         run: |
           set -euo pipefail
