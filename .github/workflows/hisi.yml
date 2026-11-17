@@ -254,24 +254,9 @@ jobs:
           echo "=== 产物列表 ==="
           ls -lh
 
-      - name: 上传构建产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: hi3798mv100-linux-${{ env.PATCHES_KERNEL_VERSION }}
-          if-no-files-found: error
-          retention-days: 90
-          path: linux_build/out/*
-
-      - name: 发布到 GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 生成发布说明
         run: |
-          set -euo pipefail
-          cd linux_build/out
-          TAG="hi3798mv100-${PATCHES_KERNEL_VERSION}-b${GITHUB_RUN_NUMBER}"
-          KREL="${{ env.PATCHES_KERNEL_VERSION }}"
-
-          cat > RELEASE_NOTES.md <<EOF
+          cat > linux_build/release_notes.md <<EOF
           # Hi3798MV100 内核 ${KREL}
 
           面向海思 Hi3798MV100 机顶盒（unt400b / EC6108V9C 系列）的自编译内核。
@@ -313,13 +298,16 @@ jobs:
           校验值见 sha256sums.txt，上机前建议先在电脑上比对一次。
           EOF
 
-          gh release create "$TAG" \
-            uImage \
-            modules.tar.gz \
-            zImage \
-            sha256sums.txt \
-            --title "Hi3798MV100 内核 ${KREL} (build ${GITHUB_RUN_NUMBER})" \
-            --notes-file RELEASE_NOTES.md \
-            --target "$GITHUB_SHA"
 
-          echo "已发布 Release：$TAG"
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: hi3798mv100_latest
+          body_path: linux_build/release_notes.md
+          generate_release_notes: true
+          files: |
+            linux_build/out/zImage
+            linux_build/out/uImage
+            linux_build/out/*.dtb
+            linux_build/out/config-*
+            linux_build/out/modules.tar.gz
