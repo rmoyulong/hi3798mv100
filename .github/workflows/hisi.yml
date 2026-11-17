@@ -1,18 +1,26 @@
 name: Hi3798MV100 内核自动构建
 
-# 修订说明（v4）：
-# 1) 基线跟随补丁库 baseline：KERNEL_VERSION = 7.4-rc2，BASE_SHA = fd9230005e85...
-# 2) 版本校验改为"规范化后比较"（去掉 X.Y.0 里的 .0），
-#    因此 7.4-rc2 与内核自报的 7.4.0-rc2 视为同一版本
-# 3) 补丁库为"根目录平铺 quilt 库"：无 pending-7.4/hack-7.4 桶目录、无 series；
-#    补丁应用继续调用仓库根目录的 apply_histb_patches.sh
-# 4) 【本版关键修正】eMMC 驱动符号：
-#    Hi3798MV100 的 mmc 节点 compatible = "hisilicon,hi3798cv200-dw-mshc"，
-#    对应 DesignWare MMC 的 CV200 扩展驱动，正确符号为
-#      CONFIG_MMC_DW=y / CONFIG_MMC_DW_PLTFM=y / CONFIG_MMC_DW_HI3798CV200=y
-#    内核里并不存在 CONFIG_MMC_HISI / CONFIG_MMC_HISI_SDHCI，已全部移除
-# 5) 去掉所有会提前关闭管道的 `| head`，避免 SIGPIPE 造成的假失败
-# 6) uImage 保持加载/入口 0x02000000、-C none，设备树追加在 zImage 末尾并校验 d00dfeed
+# ============================================================
+# 修订说明（v5）
+# ------------------------------------------------------------
+# 1) 基线跟随补丁库 baseline：KERNEL_VERSION = 7.4-rc2，
+#    BASE_SHA = fd9230005e85472b81c1c7c16afe93dd878996b1
+# 2) 版本校验改为“规范化后比较”（去掉 X.Y.0 里的 .0），
+#    7.4-rc2 与内核自报的 7.4.0-rc2 视为同一版本
+# 3) 补丁库为“根目录平铺 quilt 库”：无 pending-7.4/hack-7.4 桶目录、
+#    无 series；补丁应用继续调用仓库根目录的 apply_histb_patches.sh
+# 4) eMMC 驱动符号以 kernel.config 与设备树为准，不再猜：
+#    dts 中 emmc 节点 compatible = "hisilicon,hi3798cv200-dw-mshc"
+#      -> drivers/mmc/host/dw_mmc-hi3798cv200.c
+#      -> CONFIG_MMC_DW / MMC_DW_PLTFM / MMC_DW_HI3798CV200
+#    内核中不存在 CONFIG_MMC_HISI / CONFIG_MMC_HISI_SDHCI，已彻底移除
+# 5) 全部 | head 管道已去掉，避免 SIGPIPE 造成的假失败
+# 6) 启动参数由 bootargs 分区下发，内核内 CONFIG_CMDLINE 留空
+# 7) uImage 保持加载/入口 0x02000000、-C none，
+#    设备树追加在 zImage 末尾并校验魔数 d00dfeed
+# 8) 【本版新增】构建成功后自动发布到 GitHub Release，
+#    附带说明文本与校验用的 sha256sums.txt
+# ============================================================
 
 on:
   push:
@@ -34,7 +42,7 @@ jobs:
       ARCH: arm
       CROSS_COMPILE: arm-linux-gnueabihf-
       KERNEL_REPO: https://github.com/torvalds/linux.git
-      # 补丁仓库（你改名后的地址）
+      # 补丁仓库
       PATCHES_REPO: https://github.com/rmoyulong/histb-mainline_patches
       # 与补丁库 baseline 逐字一致
       PATCHES_BASE_SHA: fd9230005e85472b81c1c7c16afe93dd878996b1
@@ -133,8 +141,12 @@ jobs:
           [ -f ../kernel.config ] || { echo "::error::仓库根目录缺少 kernel.config"; exit 1; }
           cp ../kernel.config .config
 
-          # eMMC：mv100 的 mmc 节点 compatible = "hisilicon,hi3798cv200-dw-mshc"
-          #   -> DesignWare MMC 的 CV200 扩展驱动
+          # 说明：kernel.config 本身已包含下列全部项目，这里的 scripts/config
+          # 只是防止旧配置被覆盖时丢项，符号名以内核 Kconfig 为准
+          scripts/config --enable ARCH_HISI
+          scripts/config --enable ARCH_MULTI_V7
+          scripts/config --enable USE_OF
+          # eMMC：(compatible = "hisilicon,hi3798cv200-dw-mshc")
           scripts/config --enable MMC
           scripts/config --enable MMC_BLOCK
           scripts/config --enable MMC_DW
@@ -151,17 +163,16 @@ jobs:
           # 追加设备树 / ATAG 兼容
           scripts/config --enable ARM_APPENDED_DTB
           scripts/config --enable ARM_ATAG_DTB_COMPAT
-          scripts/config --enable USE_OF
+          scripts/config --enable ARM_ATAG_DTB_COMPAT_CMDLINE_FROM_BOOTLOADER
           scripts/config --disable RANDOMIZE_BASE
           # 启动参数交给 bootargs 分区传，不在内核里写死 root=
           scripts/config --set-str CMDLINE ""
-          scripts/config --enable CMDLINE_FROM_BOOTLOADER
-          scripts/config --disable CMDLINE_FORCE
 
           make olddefconfig
 
           echo "=== 关键配置最终取值 ==="
-          for s in ARM_APPENDED_DTB ARM_ATAG_DTB_COMPAT USE_OF \
+          for s in ARCH_HISI ARCH_MULTI_V7 USE_OF ARM_APPENDED_DTB ARM_ATAG_DTB_COMPAT \
+                   ARM_ATAG_DTB_COMPAT_CMDLINE_FROM_BOOTLOADER \
                    SERIAL_AMBA_PL011 SERIAL_AMBA_PL011_CONSOLE \
                    MMC MMC_BLOCK MMC_DW MMC_DW_PLTFM MMC_DW_HI3798CV200 \
                    EXT4_FS JBD2 FS_MBCACHE; do
@@ -172,6 +183,7 @@ jobs:
               exit 1
             fi
           done
+          echo "CMDLINE 取值：$(grep -E '^CONFIG_CMDLINE=' .config)"
           echo "=== 最终内核版本 ==="
           make -s kernelrelease
 
@@ -234,9 +246,13 @@ jobs:
           rm -f out/_mod/lib/modules/*/build out/_mod/lib/modules/*/source
           tar -czf out/modules.tar.gz -C out/_mod .
           rm -rf out/_mod
+          # 生成校验清单，便于上机前后核对
+          cd out
+          sha256sum uImage modules.tar.gz zImage "config-$KREL" > sha256sums.txt
+          cat sha256sums.txt
           echo "内核 release: $KREL"
           echo "=== 产物列表 ==="
-          ls -lh out/
+          ls -lh
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
@@ -245,3 +261,65 @@ jobs:
           if-no-files-found: error
           retention-days: 90
           path: linux_build/out/*
+
+      - name: 发布到 GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd linux_build/out
+          TAG="hi3798mv100-${PATCHES_KERNEL_VERSION}-b${GITHUB_RUN_NUMBER}"
+          KREL="${{ env.PATCHES_KERNEL_VERSION }}"
+
+          cat > RELEASE_NOTES.md <<EOF
+          # Hi3798MV100 内核 ${KREL}
+
+          面向海思 Hi3798MV100 机顶盒（unt400b / EC6108V9C 系列）的自编译内核。
+
+          ## 说明文本
+
+          - 内核基线：Linux ${KREL}（commit ${PATCHES_BASE_SHA}），工作树按补丁库 baseline 提取
+          - 补丁来源：histb-mainline_patches，根目录平铺 quilt 库，--fuzz=0 严格应用，冲突即回滚
+          - 内核配置：来自仓库 kernel.config，串口、eMMC、ext4 均编入内核（=y），不依赖模块
+          - eMMC 驱动：compatible = hisilicon,hi3798cv200-dw-mshc，对应 CONFIG_MMC_DW_HI3798CV200
+          - 启动参数：内核内 CONFIG_CMDLINE 留空，root= 由 bootargs 分区下发，不写死分区号
+          - 镜像格式：uImage 加载地址/入口地址均为 ${UIMAGE_LOADADDR}，不压缩（-C none）
+          - 设备树：${TARGET_DTB} 追加在 zImage 末尾，追加处魔数校验为 d00dfeed
+
+          ## 产物
+
+          | 文件 | 用途 |
+          | --- | --- |
+          | uImage | 内核镜像，写入 p6 (kernel) 分区 |
+          | modules.tar.gz | 内核模块，解压到根目录 / |
+          | zImage | 未打包的裸内核，仅供核对 |
+          | config-* | 本次实际使用的内核配置 |
+          | dtbs | 全部编译出的设备树 |
+          | sha256sums.txt | 上述产物的校验值 |
+
+          ## 刷写步骤（顺序不可颠倒）
+
+          1. 把 uImage 与 modules.tar.gz 传到机器 /tmp 目录
+          2. 先解压模块：cd / && tar -xzf /tmp/modules.tar.gz && sync
+          3. 再刷内核：dd if=/tmp/uImage of=/dev/mmcblk0p6 bs=1M conv=fsync && sync
+          4. 等待数秒后 reboot
+
+          ## 回滚
+
+          若启动异常（指示灯异常闪烁），用备份镜像写回内核分区：
+
+          dd if=/root/hi3798mv100-backup-20261116-165250/kernel.bin of=/dev/mmcblk0p6 bs=1M conv=fsync && sync
+
+          校验值见 sha256sums.txt，上机前建议先在电脑上比对一次。
+          EOF
+
+          gh release create "$TAG" \
+            uImage \
+            modules.tar.gz \
+            zImage \
+            sha256sums.txt \
+            --title "Hi3798MV100 内核 ${KREL} (build ${GITHUB_RUN_NUMBER})" \
+            --notes-file RELEASE_NOTES.md \
+            --target "$GITHUB_SHA"
+
+          echo "已发布 Release：$TAG"

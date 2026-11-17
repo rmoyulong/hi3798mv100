@@ -28,3 +28,16 @@ Open-source software/firmware for HiSilicon Hi3716 / Hi3796 / Hi3798 devices<br>
 你这次产物里同时出现 hi3519-demb.dtb 和 hi3798mv100-ec6108v9c.dtb，就是这个原因——只要 CONFIG_ARCH_HISI 开着，Makefile 里海思家族下所有 dtb 目标都会生成。‌多出来的 dtb 不是出错，只是你不刷它而已。‌
 
 要精简的话有两条路：一是给构建时加更具体的 dtb 目标（make dtbs 换成只编你要的那几个），二是照旧全量产出、发布时只留需要的 dtb。改 config 反而不好使，因为 dtb 列表是按家族挂的，拆不到单板粒度。
+
+| 用途 | 现在强制的符号 |
+| --- | --- |
+| eMMC 驱动 | MMC_DW、MMC_DW_PLTFM、MMC_DW_HI3798CV200 |
+| 块设备与根文件系统 | MMC、MMC_BLOCK、EXT4_FS、JBD2、FS_MBCACHE |
+| 控制台串口 | SERIAL_AMBA_PL011、SERIAL_AMBA_PL011_CONSOLE |
+| 启动设备树 | ARM_APPENDED_DTB、ARM_ATAG_DTB_COMPAT、USE_OF |
+
+eMMC 报错源自符号名写错，配置一项没缺
+设备树里 emmc 节点是 compatible = "hisilicon,hi3798cv200-dw-mshc"，对应驱动 dw_mmc-hi3798cv200.c，配置项为 ‌CONFIG_MMC_DW_HI3798CV200‌。
+这台 EC6108V9C 的设备树是 hi3798mv100-ec6108v9c.dts，emmc 走的就是这个驱动；老 Hi3798MV100 上的 HIMCI 驱动新内核早已移除，‌不存在 CONFIG_MMC_HISI / CONFIG_MMC_HISI_SDHCI‌。
+上传的 kernel.config 第 9061–9066 行本身就是 MMC_DW=y、MMC_DW_PLTFM=y、MMC_DW_HI3798CV200=y；串口、ext4、ARCH_HISI、ARCH_MULTI_V7 也全是 =y，配置无需再补。
+顺带把不存在的 CMDLINE_FROM_BOOTLOADER 换成了内核真实的 ‌ARM_ATAG_DTB_COMPAT_CMDLINE_FROM_BOOTLOADER‌，避免再冒无效符号。
