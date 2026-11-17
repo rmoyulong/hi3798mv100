@@ -19,16 +19,6 @@ Open-source software/firmware for HiSilicon Hi3716 / Hi3796 / Hi3798 devices<br>
 你这次 Release 里的 ‌hi3798mv100-ec6108v9c.dtb（17.7 KB）‌ 就是 MV100 板级补丁应用成功后才可能生成的文件，加上 zImage 和模块一起，说明这套补丁确实落到了成品上。
 想收紧范围，唯一值得排除的是 900-955 那批作者本地 bring-up / bench 补丁，其余都属正确序列，不要按芯片名删。
 
-分两层看：‌.config 决定「哪些代码编进去」，设备树 dtb 决定「哪块板子跑起来」‌，补丁只负责把源码改对，本身不决定任何编译开关。
-
-补丁改的是内核树里的驱动源码、Kconfig、DTS 文件；里面属于 Hi3716CV200、Hi3798MV200 的改动若 config 没开，就是编不进去的死代码，对 Hi3798MV100 成品没影响。
-运行时是哪块板子，看你刷进去的哪个 dtb —— 同一个 zImage 配不同 dtb 就是不同设备，这也是 MV100 适配真正落地的一环。
-反过来说，config 漏开一项就会直接翻车：上次 DRM_DISPLAY_HDMI_HELPER 没开就是典型例子，链接期才报 undefined reference。所以 config 才是这套流程里唯一需要盯紧的东西。
-一个容易误解的点：config 的粒度到家族，不到单块板子
-你这次产物里同时出现 hi3519-demb.dtb 和 hi3798mv100-ec6108v9c.dtb，就是这个原因——只要 CONFIG_ARCH_HISI 开着，Makefile 里海思家族下所有 dtb 目标都会生成。‌多出来的 dtb 不是出错，只是你不刷它而已。‌
-
-要精简的话有两条路：一是给构建时加更具体的 dtb 目标（make dtbs 换成只编你要的那几个），二是照旧全量产出、发布时只留需要的 dtb。改 config 反而不好使，因为 dtb 列表是按家族挂的，拆不到单板粒度。
-
 | 用途 | 现在强制的符号 |
 | --- | --- |
 | eMMC 驱动 | MMC_DW、MMC_DW_PLTFM、MMC_DW_HI3798CV200 |
@@ -36,8 +26,28 @@ Open-source software/firmware for HiSilicon Hi3716 / Hi3796 / Hi3798 devices<br>
 | 控制台串口 | SERIAL_AMBA_PL011、SERIAL_AMBA_PL011_CONSOLE |
 | 启动设备树 | ARM_APPENDED_DTB、ARM_ATAG_DTB_COMPAT、USE_OF |
 
-eMMC 报错源自符号名写错，配置一项没缺
-设备树里 emmc 节点是 compatible = "hisilicon,hi3798cv200-dw-mshc"，对应驱动 dw_mmc-hi3798cv200.c，配置项为 ‌CONFIG_MMC_DW_HI3798CV200‌。
-这台 EC6108V9C 的设备树是 hi3798mv100-ec6108v9c.dts，emmc 走的就是这个驱动；老 Hi3798MV100 上的 HIMCI 驱动新内核早已移除，‌不存在 CONFIG_MMC_HISI / CONFIG_MMC_HISI_SDHCI‌。
-上传的 kernel.config 第 9061–9066 行本身就是 MMC_DW=y、MMC_DW_PLTFM=y、MMC_DW_HI3798CV200=y；串口、ext4、ARCH_HISI、ARCH_MULTI_V7 也全是 =y，配置无需再补。
-顺带把不存在的 CMDLINE_FROM_BOOTLOADER 换成了内核真实的 ‌ARM_ATAG_DTB_COMPAT_CMDLINE_FROM_BOOTLOADER‌，避免再冒无效符号。
+‌新内核已在实机上跑通‌：UNT400B 现在运行的是主线 ‌7.4.0-rc2‌ 加 ‌129 个 histb 补丁‌编出的镜像，整条构建与刷写链路都已验证正确。
+
+这次是四处关键点对齐的结果
+这套补丁面向 Hi3798MV100 家族，源码基线改用补丁库自述的 ‌7.4-rc2 / fd9230005e85‌，不再套用别的版本。
+eMMC 真正生效的是 ‌CONFIG_MMC_DW_HI3798CV200‌；我先前写的 MMC_HISI_SDHCI 内核里并不存在，那就是那次报错的唯一原因。
+uImage 仍是 ‌加载/入口 0x02000000、-C none‌，设备树追加在 zImage 末尾。
+根分区继续由 bootargs 分区传 ‌root=/dev/mmcblk0p9‌，内核自身 cmdline 留空，没有硬写
+
+往后复用的两条路径
+再想升版本：把 PATCHES_BASE_SHA、PATCHES_KERNEL_VERSION 跟着补丁库 baseline 一起改，其余步骤照跑即可。
+哪天要回原厂：dd if=<备份目录>/kernel.bin of=/dev/mmcblk0p6 bs=1M conv=fsync，模块目录改名换回，还是同一套回滚动作。
+主线内核不识别 mmz=ddr,0,0,48M，海思私有的 VPU/GPU 硬解不会启用；日常使用不受影响，但视频硬解一类功能可能缺失，需要时得靠这套补丁后续继续补齐。
+
+刷机已经成功，内核、eMMC、根文件系统全部正常。日志里唯一的异常是系统想把 ‌p8（backup 分区）当作交换分区激活、激活失败‌，这是用户空间镜像里的配置残留，与本次新内核无关，不影响启动和使用。
+
+| 验证项 | 结果 | 判定 |
+| --- | --- | --- |
+| 内核启动 | 7.4.0-rc2+，129 个 histb 补丁 | 通过 |
+| eMMC | mmcblk0 7.28 GiB，p1–p9 齐备 | 通过 |
+| 根文件系统 | p9 挂载、可读写、无日志恢复告警 | 通过 |
+| swap | 仅 zram0，单元 masked、fstab 两行已注释 | 通过 |
+| eth0 MAC | 固定 9e:fa:ea:68:2f:a0，重启后不变 | 通过 |
+| 网口吞吐 | 正反向均 93.4–93.7 Mbits/sec，Retr 0 | 满速 |
+| USB 存储 | TOSHIBA 盘识别，顺序写 23.4 MB/s | 通过 |
+| 无线 | wlx20f54385e08d 接口存在，驱动就绪 | 通过 |
