@@ -3,10 +3,10 @@ name: Hi3798MV100 内核自动构建
 # ============================================================
 # 修订说明（v5）
 # ------------------------------------------------------------
-# 1) 基线跟随补丁库 baseline：KERNEL_VERSION = 7.4-rc2，
-#    BASE_SHA = fd9230005e85472b81c1c7c16afe93dd878996b1
+# 1) 基线跟随补丁库 baseline：KERNEL_VERSION = 7.4-rc3，
+#    BASE_SHA = 19d1b4de6d37bccecc3ad9144d279f1baa405eb1
 # 2) 版本校验改为“规范化后比较”（去掉 X.Y.0 里的 .0），
-#    7.4-rc2 与内核自报的 7.4.0-rc2 视为同一版本
+#    7.4-rc3 与内核自报的 7.4.0-rc3 视为同一版本
 # 3) 补丁库为“根目录平铺 quilt 库”：无 pending-7.4/hack-7.4 桶目录、
 #    无 series；补丁应用继续调用仓库根目录的 apply_histb_patches.sh
 # 4) eMMC 驱动符号以 kernel.config 与设备树为准，不再猜：
@@ -45,8 +45,8 @@ jobs:
       # 补丁仓库
       PATCHES_REPO: https://github.com/rmoyulong/histb-mainline_patches
       # 与补丁库 baseline 逐字一致
-      PATCHES_BASE_SHA: fd9230005e85472b81c1c7c16afe93dd878996b1
-      PATCHES_KERNEL_VERSION: 7.4-rc2
+      PATCHES_BASE_SHA: 19d1b4de6d37bccecc3ad9144d279f1baa405eb1
+      PATCHES_KERNEL_VERSION: 7.4-rc3
       # uImage 头内地址，与实机验证过的镜像一致
       UIMAGE_LOADADDR: "0x02000000"
       TARGET_DTB: hi3798mv100-ec6108v9c.dtb
@@ -84,7 +84,7 @@ jobs:
           cd linux_build
           git checkout -q "$PATCHES_BASE_SHA"
 
-          # 规范化：7.4.0-rc2 -> 7.4-rc2，使两种写法等价
+          # 规范化：7.4.0-rc2 -> 7.4-rc3，使两种写法等价
           norm() { printf '%s' "$1" | sed -E 's/^([0-9]+\.[0-9]+)\.0/\1/'; }
           ACT="$(make -s kernelversion)"
           EXP="$PATCHES_KERNEL_VERSION"
