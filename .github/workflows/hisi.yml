@@ -50,6 +50,7 @@ jobs:
       # uImage 头内地址，与实机验证过的镜像一致
       UIMAGE_LOADADDR: "0x02000000"
       TARGET_DTB: hi3798mv100-ec6108v9c.dtb
+      BOOT_PART: /dev/mmcblk0p6
 
     steps:
       - name: 检出仓库代码
@@ -291,21 +292,20 @@ jobs:
           | dtbs | 全部编译出的设备树 |
           | sha256sums.txt | 上述产物的校验值 |
 
-          ## 刷写步骤（顺序不可颠倒）
+            ## 刷写步骤（顺序不可颠倒）
 
-          1. 把现在能用的内核别分到usb盘上（这是举例挂载到/mnt/usb）
-             dd if=/dev/mmcblk0p6 of=/mnt/usb/hi_kernel.bin bs=1024 status=progress
-          2. 把 uImage 与 modules.tar.gz 传到机器 /usr 目录
-          3. 先解压模块：cd / && tar -xzf /usr/modules.tar.gz && sync
-          4. 再刷内核：dd if=/usr/uImage of=/dev/mmcblk0p6 bs=1M conv=fsync && sync
-          5. 等待数秒后 reboot
+            1. 把 boot.img、modules.tar.gz 传到机器 /tmp 目录
+            2. 先备份：dd if=${BOOT_PART} of=/root/boot.bak bs=1M conv=fsync
+            3. 先装模块：cd / && tar -xzf /tmp/modules.tar.gz && sync
+            4. 再刷内核：dd if=/tmp/boot.img of=${BOOT_PART} bs=1M conv=fsync && sync
+            5. 等待数秒后 reboot
 
-          ## 回滚
+            ## 回滚
 
-          若启动异常（指示灯异常闪烁），用备份镜像写回内核分区：
-          dd if=/mnt/usb/hi_kernel.bin of=/dev/mmcblk0p6 bs=1M conv=fsync && sync
-          
-          校验值见 sha256sums.txt，上机前建议先在电脑上比对一次。
+            若启动异常（指示灯异常闪烁、TTL 无输出），用备份镜像写回
+            dd if=/root/boot.bak of=${BOOT_PART} bs=1M conv=fsync && sync
+
+            校验值见 sha256sums.txt，上机前建议先在电脑上比对一次。
           EOF
 
 
