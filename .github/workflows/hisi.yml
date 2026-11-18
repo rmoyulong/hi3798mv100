@@ -314,7 +314,9 @@ jobs:
         with:
           tag_name: hi3798mv100_latest
           body_path: linux_build/release_notes.md
-          generate_release_notes: true
+          allowUpdates: true
+          replacesArtifacts: true
+          artifactErrorsFailBuild: true
           files: |
             linux_build/out/zImage
             linux_build/out/uImage
